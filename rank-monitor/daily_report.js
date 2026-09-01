@@ -43,32 +43,52 @@ function groupByBrand(items) {
   return [...map.values()].sort((a, b) => b.count - a.count || a.best - b.best);
 }
 
-// ── [1] 코드그라피 메시지 ────────────────────────────────
+// ── [1] 브랜드 진입 메시지 ────────────────────────────────
 function buildBrandMessage(items, brands) {
   const hits = items.filter(isTarget).sort((a, b) => a.rank - b.rank);
   const stamp = `_${kstNow()} KST_`;
+  const label = BRAND_NAMES.join(' / ') || '대상 브랜드';
 
   if (!hits.length) {
-    return `📉 *코드그라피 — 무신사 실시간 랭킹 TOP${TARGET} 진입 없음*\n${stamp}`;
+    return `📉 *${label} — 무신사 실시간 랭킹 TOP${TARGET} 진입 없음*\n${stamp}`;
   }
 
-  const body = hits
-    .map((i) => {
-      const dc = i.discountRate ? ` (${i.discountRate}%)` : '';
-      const tags = [
-        i.plusDelivery ? '🚚 무배당발' : null,
-        i.watching ? `👀 ${i.watching.toLocaleString('ko-KR')}명 보는 중` : null,
-        i.buying ? `🛒 ${i.buying.toLocaleString('ko-KR')}명 구매 중` : null,
-      ]
-        .filter(Boolean)
-        .join(' · ');
-      return (
-        `*${i.rank}위* ${i.name}\n` +
-        `  ${won(i.price)}원${dc}${tags ? '\n  ' + tags : ''}\n` +
-        `  ${i.url}`
-      );
-    })
-    .join('\n\n');
+  // 브랜드별로 묶어서 출력 (여러 브랜드를 동시에 볼 때 구분되도록)
+  const grouped = new Map();
+  for (const i of hits) {
+    const key = i.brandName || i.brandCode;
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key).push(i);
+  }
+
+  const blocks = [...grouped.entries()].map(([brand, list]) => {
+    const head = `*${brand}* — ${list.length}개 · 최고 ${list[0].rank}위`;
+
+    const body = list
+      .map((i) => {
+        // 소비자가(정가) → 할인가. 할인이 없으면 가격 하나만.
+        const priceLine =
+          i.originalPrice && i.originalPrice > i.price
+            ? `${won(i.originalPrice)}원 → *${won(i.price)}원* (${i.discountRate}%)`
+            : `*${won(i.price)}원*`;
+
+        const stat =
+          `👀 ${i.watching.toLocaleString('ko-KR')}명 보는 중` +
+          ` · 🛒 ${i.buying.toLocaleString('ko-KR')}명 구매 중`;
+
+        // 슬랙에서 <주소|글자> 로 쓰면 상품명이 클릭되는 링크가 된다
+        const title = i.name ? `<${i.url}|${i.name}>` : `<${i.url}|상품 ${i.goodsNo}>`;
+
+        return (
+          `${title}  /  *${i.rank}위*${i.plusDelivery ? ' 🚚무배당발' : ''}\n` +
+          `  ${priceLine}\n` +
+          `  ${stat}`
+        );
+      })
+      .join('\n\n');
+
+    return `${head}\n\n${body}`;
+  });
 
   const totalWatch = hits.reduce((s, i) => s + i.watching, 0);
   const totalBuy = hits.reduce((s, i) => s + i.buying, 0);
@@ -76,13 +96,12 @@ function buildBrandMessage(items, brands) {
   const brandRank = brands.findIndex((b) => BRAND_CODES.includes(b.code)) + 1;
 
   return (
-    `🏆 *코드그라피 — 무신사 실시간 랭킹 TOP${TARGET} ${hits.length}개 진입*\n` +
+    `🏆 *무신사 실시간 랭킹 TOP${TARGET} — ${label} ${hits.length}개 진입*\n` +
     `${stamp}\n` +
-    `최고 ${hits[0].rank}위` +
-    (brandRank ? ` · 브랜드 노출 순위 ${brandRank}위/${brands.length}개` : '') +
-    ` · 무배당발 ${plusCount}/${hits.length}개\n` +
+    (brandRank ? `브랜드 노출 순위 ${brandRank}위 / ${brands.length}개 · ` : '') +
+    `무배당발 ${plusCount}/${hits.length}개 · ` +
     `합계 👀 ${totalWatch.toLocaleString('ko-KR')}명 / 🛒 ${totalBuy.toLocaleString('ko-KR')}명\n\n` +
-    body
+    blocks.join('\n\n────────────\n\n')
   );
 }
 
