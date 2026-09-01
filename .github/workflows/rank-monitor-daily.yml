@@ -1,0 +1,27 @@
+# .github/workflows/rank-monitor-daily.yml
+name: rank-monitor-daily
+
+on:
+  schedule:
+    # 09:00 UTC = 18:00 KST (한국은 서머타임 없어서 연중 고정)
+    - cron: '0 9 * * *'
+  workflow_dispatch:
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm install playwright
+      - run: npx playwright install --with-deps chromium
+      - name: TOP500 일일 리포트
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          RANK_TARGET: '500'
+          BRAND_CODES: 'codegraphy'
+          BRAND_NAMES: '코드그라피'
+        run: node rank-monitor/daily_report.js
