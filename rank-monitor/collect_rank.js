@@ -67,9 +67,20 @@ async function collectRanking({ target = 500, headless = true, debug = false } =
           const brandName =
             ((brandA && brandA.innerText) || '').trim().split('\n')[0] || brandCode;
 
-          // 상품명: 상품 링크 <a href="/products/...">
-          const prodA = el.querySelector('a[href*="/products/"]');
-          const name = ((prodA && prodA.innerText) || '').trim().split('\n')[0];
+          // 상품명: 카드 안에 /products/ 링크가 사진용/이름용 2개 있음.
+          //         사진 링크는 글자가 없으므로, 글자가 있는 링크를 찾을 때까지 훑는다.
+          let name = '';
+          for (const a of el.querySelectorAll('a[href*="/products/"]')) {
+            const t = (a.innerText || '').trim();
+            if (t) {
+              name = t.split('\n')[0];
+              break;
+            }
+          }
+          if (!name) {
+            const img = el.querySelector('img[alt]');
+            name = ((img && img.getAttribute('alt')) || '').trim();
+          }
 
           const flag = (el.getAttribute('data-item-flag') || '').toLowerCase();
 
