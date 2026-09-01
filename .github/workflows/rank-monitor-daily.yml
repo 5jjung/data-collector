@@ -23,5 +23,5 @@ jobs:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           RANK_TARGET: '500'
           BRAND_CODES: 'codegraphy'
-          BRAND_NAMES: '코드그라피'
+          BRAND_NAMES: '코드그라피,키뮤어'
         run: node rank-monitor/daily_report.js
