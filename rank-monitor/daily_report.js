@@ -62,7 +62,22 @@ function buildBrandMessage(items, brands) {
   }
 
   const blocks = [...grouped.entries()].map(([brand, list]) => {
-    const head = `*${brand}* — ${list.length}개 · 최고 ${list[0].rank}위`;
+    // 이 브랜드가 전체 브랜드 중 몇 번째로 상품을 많이 올렸는지
+    const bi = brands.findIndex(
+      (b) => b.name === brand || b.code === (list[0].brandCode || '')
+    );
+    const exposure =
+      bi >= 0 ? ` · 브랜드 노출 ${bi + 1}위/${brands.length}개` : '';
+
+    // 무배당발: 없으면 "여부 : 없음", 있으면 "N개 중 M개"
+    const plusN = list.filter((i) => i.plusDelivery).length;
+    const plusLine = plusN
+      ? `_무배당 상품 : 진입 ${list.length}개 중 ${plusN}개_`
+      : `_무배당 상품 여부 : 없음_`;
+
+    const head =
+      `*${brand}* — TOP${TARGET} 내 ${list.length}개 · 최고 ${list[0].rank}위` +
+      `${exposure}\n${plusLine}`;
 
     const body = list
       .map((i) => {
@@ -90,18 +105,18 @@ function buildBrandMessage(items, brands) {
     return `${head}\n\n${body}`;
   });
 
-  const totalWatch = hits.reduce((s, i) => s + i.watching, 0);
-  const totalBuy = hits.reduce((s, i) => s + i.buying, 0);
-  const plusCount = hits.filter((i) => i.plusDelivery).length;
-  const brandRank = brands.findIndex((b) => BRAND_CODES.includes(b.code)) + 1;
+  // 맨 아래 용어 설명 — 처음 보는 사람도 바로 이해하도록
+  const legend =
+    `\n\n_📖 보는 법_\n` +
+    `_• 브랜드 노출 순위 = TOP${TARGET} 안에 상품을 많이 올린 브랜드끼리 매긴 순위 (전체 ${brands.length}개 브랜드 중)_\n` +
+    `_• 무배당 상품 = 무료배송·당일발송 배지가 붙은 상품_\n` +
+    `_• 👀 / 🛒 = 알림 발송 시점의 무신사 실시간 표시값_`;
 
   return (
     `🏆 *무신사 실시간 랭킹 TOP${TARGET} — ${label} ${hits.length}개 진입*\n` +
-    `${stamp}\n` +
-    (brandRank ? `브랜드 노출 순위 ${brandRank}위 / ${brands.length}개 · ` : '') +
-    `무배당발 ${plusCount}/${hits.length}개 · ` +
-    `합계 👀 ${totalWatch.toLocaleString('ko-KR')}명 / 🛒 ${totalBuy.toLocaleString('ko-KR')}명\n\n` +
-    blocks.join('\n\n────────────\n\n')
+    `${stamp}\n\n` +
+    blocks.join('\n\n────────────\n\n') +
+    legend
   );
 }
 
@@ -129,7 +144,10 @@ function buildMarketMessage(items, brands) {
     `• TOP${TARGET}: ${plus}개 (*${pct(plus, total)}%*)\n` +
     `• TOP100: ${plusTop100}개 (${pct(plusTop100, top100.length)}%)\n\n` +
     `*② 브랜드별 노출 TOP${TOP_N_BRANDS}*\n` +
-    lines.join('\n')
+    `_TOP${TARGET} 안에 상품을 많이 올린 브랜드 순_\n` +
+    lines.join('\n') +
+    `\n\n_📖 무배당발 = 무료배송·당일발송 배지가 붙은 상품. ` +
+    `모든 수치는 알림 발송 시점의 실시간 랭킹 기준입니다._`
   );
 }
 
