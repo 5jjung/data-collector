@@ -1,0 +1,35 @@
+name: 실시간 관심고객수 모니터링
+
+on:
+  schedule:
+    # 30분마다 실행 (GitHub Actions cron은 UTC 기준이라 KST와 무관하게 30분 간격이면 그대로 동작)
+    - cron: '*/30 * * * *'
+  workflow_dispatch: {} # Actions 탭에서 수동으로도 실행 가능하게
+
+jobs:
+  check-viewers:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: viewer-monitor
+    steps:
+      - name: 저장소 코드 가져오기
+        uses: actions/checkout@v4
+
+      - name: Node.js 설치
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 패키지 설치
+        run: npm install
+
+      - name: Playwright 브라우저 설치
+        run: npx playwright install --with-deps chromium
+
+      - name: 상품 조회수 체크 & 시트 기록
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          VIEWER_SPREADSHEET_ID: ${{ secrets.VIEWER_SPREADSHEET_ID }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: node collect_viewers.js
