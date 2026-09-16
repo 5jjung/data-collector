@@ -11,8 +11,12 @@ const { chromium } = require('playwright');
 const { google } = require('googleapis');
 
 // ===== 설정 =====
-const LISTING_URL = 'https://www.musinsa.com/brand/codegraphy/products?tag=26FALL&gf=A';
+const LISTING_URLS = [
+  'https://www.musinsa.com/brand/codegraphy/products?tag=26FALL&gf=A',
+  'https://www.musinsa.com/brand/codegraphy/products?tag=26WINTER&gf=A',
+];
 const SPREADSHEET_ID = process.env.VIEWER_SPREADSHEET_ID;
+// (이 아래 SHEET_NAME, SNAPSHOT_SHEET 등은 그대로 두세요)
 const SHEET_NAME = '시트1';              // 기록용 탭 (A~H열)
 const SNAPSHOT_SHEET = '좋아요_현황';     // 직전 좋아요 값 보관 탭 (없으면 자동 생성)
 const VIEWER_THRESHOLD = 50;             // 보는인원 알림 기준
