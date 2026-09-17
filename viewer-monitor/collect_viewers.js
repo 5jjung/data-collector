@@ -55,9 +55,9 @@ function signed(n) {
 // ─────────────────────────────────────────────────────────
 // 1. 리스팅 페이지에서 상품 목록(코드+이름) 수집 (가상 스크롤 대응)
 // ─────────────────────────────────────────────────────────
-async function getProductList(page) {
-  console.log('[1/4] 상품 목록 수집 중...');
-  await page.goto(LISTING_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+async function getProductList(page, listingUrl) {
+  console.log(`[1/4] 상품 목록 수집 중... (${listingUrl})`);
+  await page.goto(listingUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
   try {
     await page.waitForSelector('a[href*="/products/"]', { timeout: 20000 });
@@ -307,15 +307,27 @@ async function main() {
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 
-  const productList = await getProductList(page);
-  const likeMap = await fetchLikes(productList.map((p) => p.code));
+  // ★ 다중 URL 처리: 26FALL과 26WINTER 모두 수집
+  const productList = [];
+  for (const listingUrl of LISTING_URLS) {
+    const products = await getProductList(page, listingUrl);
+    productList.push(...products);
+  }
+
+  // ★ 중복 제거 (같은 상품이 여러 태그에 있을 수 있음)
+  const uniqueProducts = Array.from(
+    new Map(productList.map(p => [p.code, p])).values()
+  );
+  console.log(`   -> 총 ${uniqueProducts.length}개 상품 (중복 제거 후)\n`);
+
+  const likeMap = await fetchLikes(uniqueProducts.map((p) => p.code));
 
   console.log('[3/4] 각 상품 보는인원 확인 중...');
   const stamp = nowKST();
   const all = [];
 
-  for (let i = 0; i < productList.length; i++) {
-    const { code, name } = productList[i];
+  for (let i = 0; i < uniqueProducts.length; i++) {
+    const { code, name } = uniqueProducts[i];
     const viewers = await checkViewer(page, code);
     const like = likeMap.has(code) ? likeMap.get(code) : null;
 
@@ -333,7 +345,7 @@ async function main() {
     const todayDelta = (like !== null && todayBase !== null) ? like - todayBase : null;
 
     const likeLog = like === null ? '?' : `♥${like}${delta !== null ? `(${signed(delta)})` : ''}`;
-    console.log(`   (${i + 1}/${productList.length}) ${code} ${name} -> ${viewers}명  ${likeLog}`);
+    console.log(`   (${i + 1}/${uniqueProducts.length}) ${code} ${name} -> ${viewers}명  ${likeLog}`);
 
     all.push({
       code, name, viewers, like, prevLike, delta, todayBase, todayDelta,
