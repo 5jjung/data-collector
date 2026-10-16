@@ -81,6 +81,7 @@ jobs:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           GDRIVE_FOLDER_ID: ${{ vars.GDRIVE_FOLDER_ID }}
           MAX_DETAIL_PER_RUN: ${{ vars.MAX_DETAIL_PER_RUN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_LIGHT_OUTER }} # 수집 문제 발생/복구 알림
         run: npm start
 
       - name: Run probe (구조 진단)
