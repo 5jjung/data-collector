@@ -9,7 +9,7 @@
 //   3) [상세]  후보 상품 상세 페이지 수집        → src/productDetail.js
 //   4) [좋아요] 좋아요 API 조회                  → src/likes.js
 //   5) [판정]  아우터 여부 최종 판정 (카테고리 002)
-//   6) [저장]  CSV(항상) + 구글 시트(설정 시)    → src/storage/
+//   6) [저장]  누적 CSV (하루 1파일)              → src/storage/csvWriter.js
 //   7) [로그]  성공/실패 건수, 실패 원인, 누락 항목 요약
 // ============================================================
 
@@ -26,7 +26,6 @@ const { kstString, kstSlot, slotFileStamp, slotIndex } = require('./time');
 const { stats, log, warn, fail, failureSummary } = require('./logger');
 const { elapsedSec } = require('./utils');
 const csv = require('./storage/csvWriter');
-const sheets = require('./storage/googleSheets');
 
 const LOG_HEADERS = [
   '수집슬롯_KST', '시작_KST', '종료_KST', '소요초', '상태',
@@ -105,13 +104,17 @@ async function main() {
     await browser.close().catch(() => {});
   }
 
-  // 6) 저장
+  // 6) 저장 (누적 CSV + 실행 로그)
   const rows = records.map(toRow);
-  stats.rowsSaved = rows.length;
-  const csvFile = csv.saveRunCsv(stamp, HEADERS, rows);
-  log(`CSV 저장: ${csvFile} (${rows.length}행)`);
-
   const status = fatal ? '실패' : stats.failures.length || stats.warnings.length ? '부분성공' : '성공';
+  try {
+    const saved = csv.appendDaily(slot, HEADERS, rows);
+    stats.rowsSaved = saved.added;
+    log(`CSV 저장: ${saved.file} (${saved.added}행 추가${saved.added < rows.length ? `, 중복 ${rows.length - saved.added}행 제외` : ''})`);
+  } catch (e) {
+    fail('CSV저장', null, e.message);
+  }
+
   const missingText = Object.entries(stats.missingFields).map(([k, v]) => `${k}:${v}`).join(', ');
   const logRow = [
     slot, startedAt, kstString(), elapsedSec(), status,
@@ -119,19 +122,8 @@ async function main() {
     stats.detailSuccess, stats.detailFailed, stats.detailSkipped, stats.rowsSaved,
     missingText || '-', failureSummary() || '-', stats.warnings.join(' / ').slice(0, 1000) || '-',
   ];
-  csv.saveRunLog(stamp, { ...Object.fromEntries(LOG_HEADERS.map((h, i) => [h, logRow[i]])), 실패상세: stats.failures });
-
-  if (sheets.enabled()) {
-    try {
-      const added = await sheets.appendData(HEADERS, rows);
-      await sheets.appendLog(LOG_HEADERS, logRow);
-      log(`구글 시트 저장: ${added}행 추가 + 로그 1줄`);
-    } catch (e) {
-      fail('시트저장', null, e.message);
-    }
-  } else {
-    log('구글 시트 설정(LIGHT_OUTER_SPREADSHEET_ID / GOOGLE_SERVICE_ACCOUNT_JSON)이 없어 CSV만 저장했습니다.');
-  }
+  csv.appendRunLog(slot, LOG_HEADERS, logRow);
+  csv.saveRunJson(stamp, { ...Object.fromEntries(LOG_HEADERS.map((h, i) => [h, logRow[i]])), 실패상세: stats.failures });
 
   // 7) 요약
   log('===== 수집 요약 =====');

@@ -80,13 +80,12 @@ module.exports = {
   // 화면에 없는 값은 0 대신 이 문자열로 저장 (요청사항: NULL)
   NULL_TEXT: 'NULL',
 
-  OUTPUT_DIR: process.env.OUTPUT_DIR || 'output', // CSV / 디버그 파일 저장 폴더
+  // 누적 CSV 저장 폴더 (하루 1파일 + 월별 수집로그)
+  //   GitHub Actions 에서는 데이터 브랜치(light-outer-data)를 받아둔 폴더로 지정됨 (워크플로 참고)
+  DATA_DIR: process.env.DATA_DIR || 'data',
 
-  // 구글 스프레드시트 (Secrets 가 없으면 자동으로 건너뛰고 CSV만 저장)
-  SPREADSHEET_ID: process.env.LIGHT_OUTER_SPREADSHEET_ID || '',
-  GOOGLE_SERVICE_ACCOUNT_JSON: process.env.GOOGLE_SERVICE_ACCOUNT_JSON || '',
-  SHEET_DATA_TAB: '경량아우터_수집', // 데이터 누적 탭 이름
-  SHEET_LOG_TAB: '수집로그', // 실행 결과(성공/실패) 기록 탭 이름
+  // 회차별 임시 파일(랭킹 500위 전체, 실패 상세, 진단) 폴더 → Artifacts 로 30일 보관
+  OUTPUT_DIR: process.env.OUTPUT_DIR || 'output',
 
   // ─────────────────────────────────────────
   // 6. 브라우저

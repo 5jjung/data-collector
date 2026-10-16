@@ -12,7 +12,7 @@
 
 ```
 light-outer-monitor/
-├─ config.js               ✏️ 설정 (URL, 키워드, 상한, 타임아웃, 시트 탭 이름) ← 주로 여기만 수정
+├─ config.js               ✏️ 설정 (URL, 키워드, 상한, 타임아웃, 저장 폴더) ← 주로 여기만 수정
 ├─ src/
 │  ├─ main.js              실행 진입점 (전체 흐름)
 │  ├─ rankingList.js       [모듈1] 랭킹 1~500위 목록 수집 (스크롤/더보기/광고 제외)
@@ -21,48 +21,58 @@ light-outer-monitor/
 │  ├─ filter.js            "경량" 후보 + 아우터 판정 + 상세 수집 대상 순환
 │  ├─ parsers.js           ✏️ 화면 문구 → 숫자 규칙 ("명이 보는 중", "구매 1.2천+" 등)
 │  ├─ jsonGoods.js         ✏️ 내부 API(JSON) 필드 이름 별칭
-│  ├─ record.js            ✏️ 저장 컬럼 정의 (CSV·시트 공통)
+│  ├─ record.js            ✏️ 저장 컬럼 정의
 │  ├─ storage/
-│  │  ├─ csvWriter.js      CSV 저장
-│  │  └─ googleSheets.js   구글 시트 저장 (중복 방지 포함)
+│  │  └─ csvWriter.js      CSV 누적 저장 (하루 1파일, 중복 방지)
 │  ├─ browser.js / time.js / logger.js / utils.js   공통 유틸
 │  └─ probe.js             페이지 구조 진단 도구
-└─ test/                   파서/필터 단위 테스트 (npm test)
+└─ test/                   파서/필터/CSV 단위 테스트 (npm test)
 
 .github/workflows/light-outer-monitor.yml   30분 자동 실행
 ```
 
 ---
 
-## 2. 저장 방식: 구글 스프레드시트 추천 (+ CSV 백업 자동)
+## 2. 저장 방식: CSV (구글 시트 사용 안 함)
 
-| | 구글 시트 | CSV |
-|---|---|---|
-| 30분마다 누적 | ✅ 자동으로 아래에 쌓임 | ❌ 회차마다 파일이 따로 생김 → 매번 다운로드·병합 필요 |
-| 분석 | ✅ 피벗/필터/차트 바로 가능, 팀 공유 쉬움 | 엑셀로 합쳐야 함 |
-| 보관 | ✅ 영구 | GitHub Artifacts 는 30일 후 삭제 |
-| 용량 | 1,000만 셀 한도 → 하루 약 1~2천 셀 예상 시 수년 사용 가능 | 제한 없음 |
-| 설정 | 이 저장소에 이미 있는 `GOOGLE_SERVICE_ACCOUNT_JSON` 재사용 | 설정 없음 |
+30분마다 수집한 결과를 **CSV 파일로 누적**해서, 이 저장소의 데이터 전용 브랜치 **`light-outer-data`** 에 자동 커밋합니다.
+(main 브랜치의 코드 이력이 데이터 커밋으로 지저분해지지 않도록 분리)
 
-**권장: 구글 시트를 메인으로, CSV 는 매 회차 자동 백업(Artifacts)으로.**
-코드는 둘 다 지원하며, 시트 Secrets 가 없으면 CSV 만 저장합니다.
+```
+light-outer-data 브랜치
+└─ light-outer/
+   ├─ 2026-10/
+   │  ├─ 경량아우터_2026-10-16.csv   ← 하루 1파일, 30분마다 아래로 이어 붙임 (1행 = 1회차 × 1상품)
+   │  └─ 경량아우터_2026-10-17.csv
+   └─ 수집로그/
+      └─ 수집로그_2026-10.csv         ← 한 달 1파일, 회차별 성공/실패 건수·실패 원인·누락 항목
+```
 
-시트에는 탭 2개가 자동 생성됩니다.
-- `경량아우터_수집` : 데이터 누적 (1행 = 1회차 × 1상품)
-- `수집로그` : 회차별 성공/실패 건수, 실패 원인, 누락 항목 통계
+- 엑셀에서 바로 열림 (UTF-8 BOM 포함, 한글 깨짐 없음)
+- 같은 `수집키(슬롯|상품코드)` 는 다시 쓰지 않음 → 재실행해도 중복 없음
+- 컬럼 구성을 바꾸면 그날 파일은 `_v2.csv` 로 자동 분리 (기존 데이터와 섞이지 않음)
+- 영구 보관 (git 이력)
+- 예상 용량: 하루 약 48회 × 경량 아우터 수십 개 → 하루 약 1MB 내외
+
+**받는 방법**
+- 하루치: GitHub → 브랜치 `light-outer-data` 선택 → 파일 클릭 → "Download raw file"
+- 전체: GitHub → 브랜치 `light-outer-data` → Code → Download ZIP
+- 또는 `git clone -b light-outer-data <저장소주소>` 후 `git pull` 로 최신화
+
+**회차별 임시 파일** (Actions 실행 화면 → Artifacts, 30일 보관)
+- `data/랭킹전체_*.csv` : 랭킹 500위 전체 목록 (순위 검증용 — 용량이 커서 누적 저장하지 않음)
+- `logs/수집로그_*.json` : 실패 상품별 상세 원인
+- `debug/` : 페이지 스크린샷, 카드 샘플
 
 ---
 
 ## 3. 설정 방법
 
-### 3-1. GitHub Secrets (Settings → Secrets and variables → Actions)
-
-| 이름 | 내용 |
-|---|---|
-| `LIGHT_OUTER_SPREADSHEET_ID` | **새로 추가**: 기록할 구글 시트 ID (URL 의 `/d/` 와 `/edit` 사이) |
-| `GOOGLE_SERVICE_ACCOUNT_JSON` | viewer-monitor 에서 이미 쓰고 있는 값 그대로 사용 (추가 작업 없음) |
-
-시트는 서비스계정 이메일(`...@...iam.gserviceaccount.com`)에 **편집자**로 공유해야 합니다.
+### 3-1. 필요한 설정
+**없음.** Secrets 추가 없이 동작합니다.
+(워크플로에 `permissions: contents: write` 가 들어 있어 데이터 브랜치에 직접 커밋합니다.
+ 저장소 Settings → Actions → General → Workflow permissions 가 "Read repository contents" 로 막혀 있어도
+ 워크플로 파일의 permissions 설정이 적용됩니다. 조직 정책으로 막힌 경우에만 관리자에게 요청)
 
 ### 3-2. (선택) Variables
 | 이름 | 기본값 | 설명 |
@@ -72,7 +82,7 @@ light-outer-monitor/
 ### 3-3. 첫 실행 순서 (중요)
 1. **Actions → 랭킹 경량아우터 30분 수집 → Run workflow → mode = `probe`**
    → Artifacts 의 `probe/` 파일로 실제 페이지 구조 확인 (스크린샷, 카드 문구, API 주소)
-2. **mode = `collect`** 로 1회 수동 실행 → 로그의 "수집 요약" 과 시트 확인
+2. **mode = `collect`** 로 1회 수동 실행 → 실행 화면 Summary 와 `light-outer-data` 브랜치의 CSV 확인
 3. 문제 없으면 이후 30분마다 자동 실행
 
 ### 3-4. 로컬 실행
@@ -80,9 +90,9 @@ light-outer-monitor/
 cd light-outer-monitor
 npm ci
 npx playwright install chromium
-npm test        # 파서 단위 테스트
+npm test        # 파서/필터/CSV 단위 테스트
 npm run probe   # 구조 진단
-npm start       # 수집 (시트 환경변수 없으면 output/ 에 CSV 만 저장)
+npm start       # 수집 → data/ 폴더에 CSV 누적
 ```
 
 ---
@@ -145,13 +155,13 @@ npm start       # 수집 (시트 환경변수 없으면 output/ 에 CSV 만 저�
 | 상세 404 (판매종료) | 재시도 없이 실패 기록 |
 | 일부 상품 실패 | 해당 상품만 `상세_수집상태 = 실패: 원인`, 나머지는 정상 저장 |
 | 실행 시간 초과 (20분) | 남은 상세 수집 건너뛰고 지금까지 결과 저장 |
-| 같은 슬롯 재실행 | 시트에 같은 `수집키(슬롯|상품코드)` 가 있으면 저장 안 함 |
+| 같은 슬롯 재실행 | CSV 에 같은 `수집키(슬롯\|상품코드)` 가 있으면 저장 안 함 |
 | 동시 실행 | 워크플로 `concurrency` 로 1개씩만 실행 (뒤 실행은 대기) |
 | 목록 0건 | 워크플로를 실패(빨간불) 처리 → GitHub 알림 메일 |
 
 ### 로그
 - Actions 실행 화면 **Summary** 에 요약 표 (성공/실패/누락 + 수집 상품 목록)
-- 시트 `수집로그` 탭, `output/logs/수집로그_*.json` (실패 상품별 원인 포함)
+- `light-outer/수집로그/수집로그_YYYY-MM.csv` (회차별 요약), Artifacts `logs/수집로그_*.json` (실패 상품별 원인)
 - **누락항목** 컬럼: 필수 값이 NULL 인 항목 이름 → 오류 수정 포인트
 
 ---
