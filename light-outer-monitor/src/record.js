@@ -44,7 +44,7 @@ const COLUMNS = [
   ...metricCols('목록_실시간구매중인원', L('liveBuyers')),
   ...metricCols('목록_조회수', L('viewCount')),
   ...metricCols('목록_누적구매인원', L('buyerCount')),
-  ...metricCols('목록_구매건수', L('purchaseCount')),
+  ...metricCols('목록_누적판매', L('purchaseCount')), // 예: "판매 2.4천"
   ...metricCols('목록_리뷰수', L('reviewCount')),
 
   // ── 좋아요 (무신사 좋아요 API = 상세페이지 하트 숫자) ──
@@ -67,12 +67,11 @@ const COLUMNS = [
   ['상세_할인가', det((d) => d.price.salePrice)],
   ['상세_할인율', det((d) => d.price.discountRate)],
   ['상세_가격위치', det((d) => d.price.location)],
-  ...metricCols('상세_현재보는사람수', D('liveViewers')),
-  ...metricCols('상세_조회수', D('viewCount')),
-  ...metricCols('상세_누적구매인원', D('buyerCount')),
-  ...metricCols('상세_구매건수', D('purchaseCount')),
-  ...metricCols('상세_리뷰수', D('reviewCount')),
-  ...metricCols('상세_좋아요문구', D('likeCount')),
+  ...metricCols('상세_현재보는사람수', D('liveViewers')), // "N명이 보고 있어요"
+  ...metricCols('상세_조회수', D('viewCount')), // "조회수 2.6천 회 이상 (최근 1개월)"
+  ...metricCols('상세_누적판매', D('purchaseCount')), // "누적판매 50개 이상"
+  ...metricCols('상세_리뷰수', D('reviewCount')), // 내장데이터 goodsReview.totalCount
+  ['상세_무배당', det((d) => (d.delivery.decided ? d.delivery.isMuBaeDang : null))],
 
   // ── 누락 점검 ──
   ['누락항목', (r) => r.missing.join(', ') || null],

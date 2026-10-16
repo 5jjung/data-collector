@@ -1,7 +1,7 @@
 // ============================================================
-// CSV 저장 (구글 시트 사용 안 함)
+// CSV 저장
 // ------------------------------------------------------------
-// [누적 데이터]  DATA_DIR (GitHub Actions 에서는 데이터 브랜치 "light-outer-data")
+// [누적 데이터]  DATA_DIR 에 만든 뒤 구글 드라이브 폴더로 올림 (storage/googleDrive.js)
 //   2026-10/경량아우터_2026-10-16.csv     ← 하루 1파일, 30분마다 아래에 이어 붙임
 //   수집로그/수집로그_2026-10.csv          ← 한 달 1파일, 회차별 성공/실패 요약 1줄씩
 //
@@ -65,17 +65,19 @@ function appendCsv(filePath, headers, rows, dedupe = true) {
   return { file: target, added: fresh.length };
 }
 
+// 누적 파일의 상대 경로 (로컬 DATA_DIR / 드라이브 폴더 공통)
+// ✏️ 파일 이름 규칙을 바꾸려면 여기만 수정
+const dailyRelPath = (slot) => `${slot.slice(0, 7)}/경량아우터_${slot.slice(0, 10)}.csv`; // "2026-10/경량아우터_2026-10-16.csv"
+const logRelPath = (slot) => `수집로그/수집로그_${slot.slice(0, 7)}.csv`;
+
 /** 누적 데이터 저장: DATA_DIR/YYYY-MM/경량아우터_YYYY-MM-DD.csv */
 function appendDaily(slot, headers, rows) {
-  const day = slot.slice(0, 10); // "2026-10-16"
-  const file = path.join(config.DATA_DIR, day.slice(0, 7), `경량아우터_${day}.csv`);
-  return appendCsv(file, headers, rows, true);
+  return appendCsv(path.join(config.DATA_DIR, dailyRelPath(slot)), headers, rows, true);
 }
 
 /** 실행 로그 저장: DATA_DIR/수집로그/수집로그_YYYY-MM.csv */
 function appendRunLog(slot, headers, row) {
-  const file = path.join(config.DATA_DIR, '수집로그', `수집로그_${slot.slice(0, 7)}.csv`);
-  return appendCsv(file, headers, [row], false);
+  return appendCsv(path.join(config.DATA_DIR, logRelPath(slot)), headers, [row], false);
 }
 
 /** 회차별 상세 실패 로그(JSON) — Artifacts 용 */
@@ -86,4 +88,4 @@ function saveRunJson(stamp, summary) {
   return file;
 }
 
-module.exports = { writeCsv, appendCsv, appendDaily, appendRunLog, saveRunJson };
+module.exports = { writeCsv, appendCsv, appendDaily, appendRunLog, saveRunJson, dailyRelPath, logRelPath };

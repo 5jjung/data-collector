@@ -42,12 +42,12 @@ async function probe() {
   const resp = await page.goto(config.RANKING_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
   log(`[probe] HTTP ${resp && resp.status()} / ${page.url()}`);
   await sleep(4000);
-  await page.screenshot({ path: path.join(OUT, 'ranking_top.png') });
+  await page.screenshot({ path: path.join(OUT, 'ranking_top.png'), timeout: 10000 }).catch(() => {});
 
   // 스크롤하며 카드 수 변화 기록
   const scrollLog = [];
   const all = new Map();
-  for (let i = 0; i < 150; i++) {
+  for (let i = 0; i < 40; i++) {
     const cards = await page.evaluate(readCardsInBrowser);
     cards.forEach((c) => all.has(c.goodsNo) || all.set(c.goodsNo, c));
     const info = await page.evaluate(() => ({
@@ -84,17 +84,34 @@ async function probe() {
     const info = await p.evaluate(() => {
       const mss = window.__MSS__;
       const st = mss && mss.product && mss.product.state;
+      const nd = document.getElementById('__NEXT_DATA__');
+      // 가격 문구 주변 HTML (화면 구조 확인용)
+      const priceEls = Array.from(document.querySelectorAll('main *'))
+        .filter((e) => e.children.length === 0 && /\d[\d,]*\s*원/.test(e.textContent || ''))
+        .slice(0, 30)
+        .map((e) => ({ text: e.textContent.trim(), tag: e.tagName, cls: e.className, parent: (e.parentElement && e.parentElement.outerHTML || '').slice(0, 400) }));
       return {
-        lines: document.body.innerText.split('\n').map((s) => s.trim()).filter(Boolean).slice(0, 250),
+        lines: (document.querySelector('main') || document.body).innerText.split('\n').map((s) => s.trim()).filter(Boolean).slice(0, 300),
         mssStateKeys: st ? Object.keys(st) : null,
-        mssState: st ? JSON.stringify(st).slice(0, 20000) : null,
-        hasNextData: !!document.getElementById('__NEXT_DATA__'),
+        mssState: st ? JSON.stringify(st).slice(0, 60000) : null,
+        hasNextData: !!nd,
+        nextData: nd ? nd.textContent.slice(0, 60000) : null,
+        priceEls,
         categoryLinks: Array.from(document.querySelectorAll('a[href*="/category/"]')).slice(0, 20).map((a) => [a.innerText.trim(), a.getAttribute('href')]),
       };
     });
-    await p.screenshot({ path: path.join(OUT, `detail_${c.goodsNo}.png`) });
+    await p.screenshot({ path: path.join(OUT, `detail_${c.goodsNo}.png`), timeout: 10000 }).catch(() => {});
     fs.writeFileSync(path.join(OUT, `detail_${c.goodsNo}.json`), JSON.stringify({ url, ...info, apis: dApis }, null, 2));
-    log(`[probe] 상세 ${c.goodsNo}: 텍스트 ${info.lines.length}줄, 내장데이터 ${info.mssStateKeys ? '있음' : '없음'}`);
+    log(`[probe] 상세 ${c.goodsNo}: 텍스트 ${info.lines.length}줄, 내장데이터 ${info.mssStateKeys ? '있음' : '없음'}, __NEXT_DATA__ ${info.hasNextData ? '있음' : '없음'}`);
+    // 로그에서 바로 확인할 수 있도록 핵심 내용 출력 (Artifacts 를 못 받는 환경 대비)
+    console.log(`[probe-detail-lines ${c.goodsNo}]\n` + info.lines.slice(0, 120).map((l, i) => `${i}: ${l}`).join('\n'));
+    console.log(`[probe-detail-price-els ${c.goodsNo}]\n` + JSON.stringify(info.priceEls.slice(0, 15), null, 1));
+    const raw = info.mssState || info.nextData || '';
+    const keyHits = [];
+    const re = /"([A-Za-z]*(?:[Pp]rice|[Rr]eview|[Dd]iscount|[Ll]ike|[Vv]iew|[Pp]urchase|[Ss]ale|[Cc]ategory|[Dd]elivery)[A-Za-z]*)":(\{[^{}]{0,300}\}|[^,{}\]]{0,60})/g;
+    let m;
+    while ((m = re.exec(raw)) && keyHits.length < 80) keyHits.push(`${m[1]}=${m[2]}`);
+    console.log(`[probe-detail-state-keys ${c.goodsNo}] stateKeys=${JSON.stringify(info.mssStateKeys)}\n` + keyHits.join('\n'));
     await p.close();
   }
 

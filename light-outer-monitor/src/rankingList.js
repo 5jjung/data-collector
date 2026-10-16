@@ -248,7 +248,7 @@ async function collectRankingList(browser, debugDir) {
   if (debugDir) {
     try {
       await page.evaluate(() => window.scrollTo(0, 0));
-      await page.screenshot({ path: path.join(debugDir, 'ranking_top.png') });
+      await page.screenshot({ path: path.join(debugDir, 'ranking_top.png'), timeout: 10000 });
       fs.writeFileSync(
         path.join(debugDir, 'ranking_cards_sample.json'),
         JSON.stringify(Array.from(domCards.values()).slice(0, 40), null, 2)

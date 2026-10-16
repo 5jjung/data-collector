@@ -23,7 +23,8 @@ light-outer-monitor/
 │  ├─ jsonGoods.js         ✏️ 내부 API(JSON) 필드 이름 별칭
 │  ├─ record.js            ✏️ 저장 컬럼 정의
 │  ├─ storage/
-│  │  └─ csvWriter.js      CSV 누적 저장 (하루 1파일, 중복 방지)
+│  │  ├─ csvWriter.js      CSV 누적 (하루 1파일, 중복 방지)
+│  │  └─ googleDrive.js    구글 드라이브 업로드 (받기 → 이어붙이기 → 올리기)
 │  ├─ browser.js / time.js / logger.js / utils.js   공통 유틸
 │  └─ probe.js             페이지 구조 진단 도구
 └─ test/                   파서/필터/CSV 단위 테스트 (npm test)
@@ -33,34 +34,29 @@ light-outer-monitor/
 
 ---
 
-## 2. 저장 방식: CSV (구글 시트 사용 안 함)
+## 2. 저장 위치: 구글 드라이브 폴더 (CSV)
 
-30분마다 수집한 결과를 **CSV 파일로 누적**해서, 이 저장소의 데이터 전용 브랜치 **`light-outer-data`** 에 자동 커밋합니다.
-(main 브랜치의 코드 이력이 데이터 커밋으로 지저분해지지 않도록 분리)
+30분마다 수집한 결과를 CSV 로 만들어 **구글 드라이브 폴더**에 누적 저장합니다.
+기본 폴더: `20261016 무신사_경량_크롤링저장` (https://drive.google.com/drive/folders/1I8n7B6jjNo2crHRObdub_UZdrEDcyU9g)
 
 ```
-light-outer-data 브랜치
-└─ light-outer/
-   ├─ 2026-10/
-   │  ├─ 경량아우터_2026-10-16.csv   ← 하루 1파일, 30분마다 아래로 이어 붙임 (1행 = 1회차 × 1상품)
-   │  └─ 경량아우터_2026-10-17.csv
-   └─ 수집로그/
-      └─ 수집로그_2026-10.csv         ← 한 달 1파일, 회차별 성공/실패 건수·실패 원인·누락 항목
+[드라이브 폴더]
+├─ 2026-10/
+│  ├─ 경량아우터_2026-10-16.csv   ← 하루 1파일, 30분마다 아래로 이어 붙임 (1행 = 1회차 × 1상품)
+│  └─ 경량아우터_2026-10-17.csv
+└─ 수집로그/
+   └─ 수집로그_2026-10.csv         ← 한 달 1파일, 회차별 성공/실패 건수·실패 원인·누락 항목
 ```
 
-- 엑셀에서 바로 열림 (UTF-8 BOM 포함, 한글 깨짐 없음)
+- 엑셀/구글 시트에서 바로 열림 (UTF-8 BOM 포함, 한글 깨짐 없음)
 - 같은 `수집키(슬롯|상품코드)` 는 다시 쓰지 않음 → 재실행해도 중복 없음
-- 컬럼 구성을 바꾸면 그날 파일은 `_v2.csv` 로 자동 분리 (기존 데이터와 섞이지 않음)
-- 영구 보관 (git 이력)
-- 예상 용량: 하루 약 48회 × 경량 아우터 수십 개 → 하루 약 1MB 내외
+- 컬럼 구성을 바꾸면 그날 파일은 `_v2.csv` 로 자동 분리
+- 드라이브의 기존 파일을 받아오지 못한 회차는 **덮어쓰지 않고** 실패로 기록 (데이터 손실 방지)
+- 저장 폴더를 바꾸려면: GitHub Variables 에 `GDRIVE_FOLDER_ID` 추가 (폴더 주소의 `/folders/` 뒤 부분)
 
-**받는 방법**
-- 하루치: GitHub → 브랜치 `light-outer-data` 선택 → 파일 클릭 → "Download raw file"
-- 전체: GitHub → 브랜치 `light-outer-data` → Code → Download ZIP
-- 또는 `git clone -b light-outer-data <저장소주소>` 후 `git pull` 로 최신화
-
-**회차별 임시 파일** (Actions 실행 화면 → Artifacts, 30일 보관)
-- `data/랭킹전체_*.csv` : 랭킹 500위 전체 목록 (순위 검증용 — 용량이 커서 누적 저장하지 않음)
+**회차별 백업** (Actions 실행 화면 → Artifacts, 30일 보관)
+- `누적/` : 그 회차에 만든 누적 CSV 사본 (드라이브 저장이 실패해도 여기 남음)
+- `data/랭킹전체_*.csv` : 랭킹 500위 전체 목록 (순위 검증용)
 - `logs/수집로그_*.json` : 실패 상품별 상세 원인
 - `debug/` : 페이지 스크린샷, 카드 샘플
 
@@ -68,11 +64,34 @@ light-outer-data 브랜치
 
 ## 3. 설정 방법
 
-### 3-1. 필요한 설정
-**없음.** Secrets 추가 없이 동작합니다.
-(워크플로에 `permissions: contents: write` 가 들어 있어 데이터 브랜치에 직접 커밋합니다.
- 저장소 Settings → Actions → General → Workflow permissions 가 "Read repository contents" 로 막혀 있어도
- 워크플로 파일의 permissions 설정이 적용됩니다. 조직 정책으로 막힌 경우에만 관리자에게 요청)
+### 3-1. 구글 드라이브 저장 권한 (처음 1번)
+
+구글 정책상 **서비스계정은 "내 드라이브" 폴더에 파일을 만들 수 없어서**(저장 용량 0),
+폴더 주인 계정(ojh.md@concreteworks.page)으로 로그인 권한을 1번 받아 GitHub Secrets 에 넣습니다.
+
+1. **Google Cloud Console** (https://console.cloud.google.com) → 기존 서비스계정을 만든 프로젝트 선택
+2. **API 및 서비스 → 라이브러리** → "Google Drive API" 검색 → **사용**
+3. **API 및 서비스 → OAuth 동의 화면** → 사용자 유형 **내부(Internal)** → 앱 이름 아무거나 → 저장
+   (※ "내부"로 해야 로그인 권한이 7일 만에 만료되지 않습니다)
+4. **API 및 서비스 → 사용자 인증 정보 → 사용자 인증 정보 만들기 → OAuth 클라이언트 ID**
+   - 애플리케이션 유형: **웹 애플리케이션**
+   - 승인된 리디렉션 URI: `https://developers.google.com/oauthplayground`
+   - 만들기 → **클라이언트 ID**, **클라이언트 보안 비밀번호** 복사
+5. **OAuth Playground** (https://developers.google.com/oauthplayground) 접속
+   - 오른쪽 위 톱니바퀴 → **Use your own OAuth credentials** 체크 → 4번의 ID/비밀번호 붙여넣기
+   - 왼쪽 Step 1 입력칸에 `https://www.googleapis.com/auth/drive` 입력 → **Authorize APIs**
+   - ojh.md@concreteworks.page 로 로그인 → 허용
+   - Step 2 → **Exchange authorization code for tokens** → **Refresh token** 복사
+6. **GitHub 저장소 → Settings → Secrets and variables → Actions → New repository secret** 3개 추가
+
+| 이름 | 값 |
+|---|---|
+| `GDRIVE_CLIENT_ID` | 4번 클라이언트 ID |
+| `GDRIVE_CLIENT_SECRET` | 4번 클라이언트 보안 비밀번호 |
+| `GDRIVE_REFRESH_TOKEN` | 5번 Refresh token |
+
+> 대안: 폴더를 **공유 드라이브**로 옮기고 기존 서비스계정 이메일을 "콘텐츠 관리자"로 추가하면
+> 위 설정 없이 기존 `GOOGLE_SERVICE_ACCOUNT_JSON` 으로 저장됩니다.
 
 ### 3-2. (선택) Variables
 | 이름 | 기본값 | 설명 |
@@ -82,7 +101,7 @@ light-outer-data 브랜치
 ### 3-3. 첫 실행 순서 (중요)
 1. **Actions → 랭킹 경량아우터 30분 수집 → Run workflow → mode = `probe`**
    → Artifacts 의 `probe/` 파일로 실제 페이지 구조 확인 (스크린샷, 카드 문구, API 주소)
-2. **mode = `collect`** 로 1회 수동 실행 → 실행 화면 Summary 와 `light-outer-data` 브랜치의 CSV 확인
+2. **mode = `collect`** 로 1회 수동 실행 → 실행 화면 Summary 와 드라이브 폴더의 CSV 확인
 3. 문제 없으면 이후 30분마다 자동 실행
 
 ### 3-4. 로컬 실행
@@ -92,7 +111,7 @@ npm ci
 npx playwright install chromium
 npm test        # 파서/필터/CSV 단위 테스트
 npm run probe   # 구조 진단
-npm start       # 수집 → data/ 폴더에 CSV 누적
+npm start       # 수집 → output/누적/ 에 CSV 누적 (GDRIVE_* 환경변수가 있으면 드라이브에도 저장)
 ```
 
 ---
@@ -161,7 +180,7 @@ npm start       # 수집 → data/ 폴더에 CSV 누적
 
 ### 로그
 - Actions 실행 화면 **Summary** 에 요약 표 (성공/실패/누락 + 수집 상품 목록)
-- `light-outer/수집로그/수집로그_YYYY-MM.csv` (회차별 요약), Artifacts `logs/수집로그_*.json` (실패 상품별 원인)
+- 드라이브 `수집로그/수집로그_YYYY-MM.csv` (회차별 요약), Artifacts `logs/수집로그_*.json` (실패 상품별 원인)
 - **누락항목** 컬럼: 필수 값이 NULL 인 항목 이름 → 오류 수정 포인트
 
 ---
