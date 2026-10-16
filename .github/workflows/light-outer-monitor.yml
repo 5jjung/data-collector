@@ -1,0 +1,90 @@
+# ============================================================
+# 무신사 랭킹 1~500위 "경량 아우터" 30분 단위 자동 수집
+# 코드 위치: light-outer-monitor/
+# ------------------------------------------------------------
+# - 매시 00분 / 30분 실행 (한국시간 = UTC+9 이므로 분 단위는 동일)
+#   ※ GitHub 예약 실행은 서버 사정으로 수 분~수십 분 늦거나 드물게 건너뛸 수 있음
+#     → 데이터에는 "수집슬롯_KST"(정각/30분) 와 "수집일시_KST"(실제) 가 같이 기록됨
+# - concurrency: 이전 실행이 끝나지 않았으면 다음 실행은 "대기"(취소/동시실행 X)
+# - 수동 실행: Actions 탭 → 이 워크플로 → Run workflow
+#     mode = collect(수집) / probe(페이지 구조 진단)
+# ============================================================
+name: 랭킹 경량아우터 30분 수집
+
+on:
+  schedule:
+    - cron: '0,30 * * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'collect = 수집 / probe = 페이지 구조 진단'
+        required: true
+        default: collect
+        type: choice
+        options: [collect, probe]
+
+# 중복 실행 방지: 같은 그룹은 한 번에 1개만 실행, 진행 중인 실행은 취소하지 않음
+concurrency:
+  group: light-outer-monitor
+  cancel-in-progress: false
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 28 # 30분 주기와 겹치지 않도록 강제 종료 시간
+    defaults:
+      run:
+        working-directory: light-outer-monitor
+    env:
+      TZ: Asia/Seoul
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: light-outer-monitor/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # 브라우저 설치 캐시 (매 30분마다 다운로드하지 않도록)
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: pw-${{ runner.os }}-${{ hashFiles('light-outer-monitor/package-lock.json') }}
+
+      - name: Install Chromium
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: Install Chromium system deps
+        if: steps.pw-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+
+      - name: Run collector
+        if: github.event_name == 'schedule' || inputs.mode == 'collect'
+        env:
+          LIGHT_OUTER_SPREADSHEET_ID: ${{ secrets.LIGHT_OUTER_SPREADSHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          MAX_DETAIL_PER_RUN: ${{ vars.MAX_DETAIL_PER_RUN }}
+        run: npm start
+
+      - name: Run probe (구조 진단)
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'probe'
+        run: npm run probe
+
+      # 결과 CSV / 로그 / 진단 파일을 Artifacts 로 보관 (실패해도 업로드)
+      - name: Upload output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: output-${{ github.run_id }}
+          path: light-outer-monitor/output/
+          retention-days: 30
+          if-no-files-found: ignore
