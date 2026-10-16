@@ -5,7 +5,7 @@
 //
 // 전체 흐름
 //   1) [목록]  랭킹 1~500위 수집               → src/rankingList.js
-//   2) [필터]  상품명에 "경량" 포함 후보 선정    → src/filter.js
+//   2) [필터]  상품명 키워드로 후보 선정 → 상세에서 아우터+경량 판정 → src/filter.js
 //   3) [상세]  후보 상품 상세 페이지 수집        → src/productDetail.js
 //   4) [좋아요] 좋아요 API 조회                  → src/likes.js
 //   5) [판정]  아우터 여부 최종 판정 (카테고리 002)
@@ -20,7 +20,7 @@ const { launchBrowser } = require('./browser');
 const { collectRankingList } = require('./rankingList');
 const { collectDetails } = require('./productDetail');
 const { fetchLikes } = require('./likes');
-const { isCandidate, judgeOuter, planDetailTargets } = require('./filter');
+const { isCandidate, judgeTarget, planDetailTargets } = require('./filter');
 const { HEADERS, toRow } = require('./record');
 const { kstString, kstSlot, slotFileStamp, slotIndex } = require('./time');
 const { stats, log, warn, fail, failureSummary } = require('./logger');
@@ -30,7 +30,7 @@ const drive = require('./storage/googleDrive');
 
 const LOG_HEADERS = [
   '수집슬롯_KST', '시작_KST', '종료_KST', '소요초', '상태',
-  '랭킹수집건수', '최대순위', '광고추천제외', '경량후보', '상세대상', '상세성공', '상세실패', '상세건너뜀',
+  '랭킹수집건수', '최대순위', '광고추천제외', '후보', '상세대상', '상세성공', '상세실패', '상세건너뜀',
   '저장행수', '누락항목통계', '실패원인', '경고',
 ];
 
@@ -60,10 +60,10 @@ async function main() {
       items.map((i) => [i.rank, i.rankSource, i.goodsNo, i.brandName, i.goodsName, i.salePrice, i.discountRate, i.cardText])
     );
 
-    // 2) "경량" 후보
+    // 2) 후보 (상품명에 경량/라이트/패딩/다운 등 — 최종 판정은 상세 카테고리로)
     const candidates = items.filter(isCandidate);
     stats.candidates = candidates.length;
-    log(`"경량" 후보: ${candidates.length}개 → ${candidates.map((c) => `${c.rank}위`).join(', ')}`);
+    log(`후보(상세 확인 대상): ${candidates.length}개 → ${candidates.map((c) => `${c.rank}위`).join(', ')}`);
 
     // 3) 상세 페이지 (후보만, 상한 초과 시 순환)
     const plan = planDetailTargets(candidates, slotIndex(now));
@@ -79,11 +79,12 @@ async function main() {
     const collectedAt = kstString();
     for (const item of candidates) {
       const detail = details.get(item.goodsNo) || null;
-      const { isOuter, reason } = judgeOuter(item, detail);
-      if (!isOuter) {
-        log(`   - 제외(아우터 아님): ${item.rank}위 ${item.goodsName} [${reason}]`);
+      const { include, reason } = judgeTarget(item, detail);
+      if (!include) {
+        log(`   - 제외: ${item.rank}위 ${item.goodsName} [${reason}]`);
         continue;
       }
+      log(`   + 포함: ${item.rank}위 ${item.goodsName} [${reason}]`);
       const listDelivery = item.delivery;
       records.push({
         slot,
