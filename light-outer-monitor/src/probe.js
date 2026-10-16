@@ -102,7 +102,16 @@ async function probe() {
     });
     await p.screenshot({ path: path.join(OUT, `detail_${c.goodsNo}.png`), timeout: 10000 }).catch(() => {});
     fs.writeFileSync(path.join(OUT, `detail_${c.goodsNo}.json`), JSON.stringify({ url, ...info, apis: dApis }, null, 2));
-    log(`[probe] 상세 ${c.goodsNo}: 텍스트 ${info.lines.length}줄, 내장데이터 ${info.mssStateKeys ? '있음' : '없음'}`);
+    log(`[probe] 상세 ${c.goodsNo}: 텍스트 ${info.lines.length}줄, 내장데이터 ${info.mssStateKeys ? '있음' : '없음'}, __NEXT_DATA__ ${info.hasNextData ? '있음' : '없음'}`);
+    // 로그에서 바로 확인할 수 있도록 핵심 내용 출력 (Artifacts 를 못 받는 환경 대비)
+    console.log(`[probe-detail-lines ${c.goodsNo}]\n` + info.lines.slice(0, 120).map((l, i) => `${i}: ${l}`).join('\n'));
+    console.log(`[probe-detail-price-els ${c.goodsNo}]\n` + JSON.stringify(info.priceEls.slice(0, 15), null, 1));
+    const raw = info.mssState || info.nextData || '';
+    const keyHits = [];
+    const re = /"([A-Za-z]*(?:[Pp]rice|[Rr]eview|[Dd]iscount|[Ll]ike|[Vv]iew|[Pp]urchase|[Ss]ale|[Cc]ategory|[Dd]elivery)[A-Za-z]*)":(\{[^{}]{0,300}\}|[^,{}\]]{0,60})/g;
+    let m;
+    while ((m = re.exec(raw)) && keyHits.length < 80) keyHits.push(`${m[1]}=${m[2]}`);
+    console.log(`[probe-detail-state-keys ${c.goodsNo}] stateKeys=${JSON.stringify(info.mssStateKeys)}\n` + keyHits.join('\n'));
     await p.close();
   }
 
