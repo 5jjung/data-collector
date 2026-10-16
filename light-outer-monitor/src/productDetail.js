@@ -68,10 +68,20 @@ function readDetailInBrowser() {
   };
 }
 
-/** JSON 안에서 대분류 카테고리 코드/이름 찾기 */
+/** JSON 안에서 카테고리 코드/이름 찾기 (전체 경로 baseCategoryFullPath 우선) */
 function findCategory(json) {
   let code = null;
   let name = null;
+  // 1순위: 전체 경로 "Clothing > 패딩/헤비 아우터 > 경량 패딩" (경량 판정에 필요)
+  const findPath = (n, d) => {
+    if (name || !n || typeof n !== 'object' || d > 14) return;
+    if (typeof n.baseCategoryFullPath === 'string' && n.baseCategoryFullPath) {
+      name = n.baseCategoryFullPath;
+      return;
+    }
+    Object.values(n).forEach((v) => findPath(v, d + 1));
+  };
+  findPath(json, 0);
   const walk = (n, d) => {
     if (!n || typeof n !== 'object' || d > 10 || (code && name)) return;
     for (const [k, v] of Object.entries(n)) {

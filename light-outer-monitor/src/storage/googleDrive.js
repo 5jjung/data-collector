@@ -112,6 +112,21 @@ async function pull(relPath, localRoot) {
   return true;
 }
 
+/**
+ * 기본 파일과 컬럼 변경으로 생긴 _v2, _v3 … 파일까지 모두 받아옴
+ * (하나라도 빠지면 그 파일을 새로 만들어 올리면서 드라이브 데이터를 덮어쓰게 되므로)
+ */
+async function pullAll(relPath, localRoot) {
+  const got = [];
+  if (await pull(relPath, localRoot)) got.push(relPath);
+  for (let v = 2; v < 50; v++) {
+    const rel = relPath.replace(/\.csv$/, `_v${v}.csv`);
+    if (!(await pull(rel, localRoot))) break;
+    got.push(rel);
+  }
+  return got;
+}
+
 /** 로컬 파일을 드라이브에 올림 (있으면 내용 교체, 없으면 새로 생성) */
 async function push(relPath, localRoot) {
   const local = path.join(localRoot, relPath);
@@ -136,4 +151,4 @@ async function push(relPath, localRoot) {
   return loc.name;
 }
 
-module.exports = { enabled, pull, push, authMode: () => authMode };
+module.exports = { enabled, pull, pullAll, push, authMode: () => authMode };

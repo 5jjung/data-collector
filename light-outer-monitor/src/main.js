@@ -5,7 +5,7 @@
 //
 // 전체 흐름
 //   1) [목록]  랭킹 1~500위 수집               → src/rankingList.js
-//   2) [필터]  상품명에 "경량" 포함 후보 선정    → src/filter.js
+//   2) [필터]  상품명 키워드로 후보 선정 → 상세에서 아우터+경량 판정 → src/filter.js
 //   3) [상세]  후보 상품 상세 페이지 수집        → src/productDetail.js
 //   4) [좋아요] 좋아요 API 조회                  → src/likes.js
 //   5) [판정]  아우터 여부 최종 판정 (카테고리 002)
@@ -20,7 +20,7 @@ const { launchBrowser } = require('./browser');
 const { collectRankingList } = require('./rankingList');
 const { collectDetails } = require('./productDetail');
 const { fetchLikes } = require('./likes');
-const { isCandidate, judgeOuter, planDetailTargets } = require('./filter');
+const { isCandidate, judgeTarget, planDetailTargets } = require('./filter');
 const { HEADERS, toRow } = require('./record');
 const { kstString, kstSlot, slotFileStamp, slotIndex } = require('./time');
 const { stats, log, warn, fail, failureSummary } = require('./logger');
@@ -30,7 +30,7 @@ const drive = require('./storage/googleDrive');
 
 const LOG_HEADERS = [
   '수집슬롯_KST', '시작_KST', '종료_KST', '소요초', '상태',
-  '랭킹수집건수', '최대순위', '광고추천제외', '경량후보', '상세대상', '상세성공', '상세실패', '상세건너뜀',
+  '랭킹수집건수', '최대순위', '광고추천제외', '후보', '상세대상', '상세성공', '상세실패', '상세건너뜀',
   '저장행수', '누락항목통계', '실패원인', '경고',
 ];
 
@@ -60,10 +60,10 @@ async function main() {
       items.map((i) => [i.rank, i.rankSource, i.goodsNo, i.brandName, i.goodsName, i.salePrice, i.discountRate, i.cardText])
     );
 
-    // 2) "경량" 후보
+    // 2) 후보 (상품명에 경량/라이트/패딩/다운 등 — 최종 판정은 상세 카테고리로)
     const candidates = items.filter(isCandidate);
     stats.candidates = candidates.length;
-    log(`"경량" 후보: ${candidates.length}개 → ${candidates.map((c) => `${c.rank}위`).join(', ')}`);
+    log(`후보(상세 확인 대상): ${candidates.length}개 → ${candidates.map((c) => `${c.rank}위`).join(', ')}`);
 
     // 3) 상세 페이지 (후보만, 상한 초과 시 순환)
     const plan = planDetailTargets(candidates, slotIndex(now));
@@ -79,11 +79,12 @@ async function main() {
     const collectedAt = kstString();
     for (const item of candidates) {
       const detail = details.get(item.goodsNo) || null;
-      const { isOuter, reason } = judgeOuter(item, detail);
-      if (!isOuter) {
-        log(`   - 제외(아우터 아님): ${item.rank}위 ${item.goodsName} [${reason}]`);
+      const { include, reason } = judgeTarget(item, detail);
+      if (!include) {
+        log(`   - 제외: ${item.rank}위 ${item.goodsName} [${reason}]`);
         continue;
       }
+      log(`   + 포함: ${item.rank}위 ${item.goodsName} [${reason}]`);
       const listDelivery = item.delivery;
       records.push({
         slot,
@@ -113,7 +114,7 @@ async function main() {
     warn('구글 드라이브 설정(GDRIVE_* Secrets)이 없어 드라이브 저장을 건너뜁니다. CSV 는 Artifacts 에만 남습니다.');
   } else {
     try {
-      for (const rel of relPaths) await drive.pull(rel, config.DATA_DIR);
+      for (const rel of relPaths) await drive.pullAll(rel, config.DATA_DIR);
     } catch (e) {
       // 기존 파일을 못 받은 상태에서 올리면 드라이브 데이터를 덮어쓰게 되므로 올리기 중단
       driveReady = false;
@@ -121,8 +122,10 @@ async function main() {
     }
   }
 
+  const savedFiles = []; // 드라이브에 올릴 실제 파일 (컬럼 변경 시 _v2 등)
   try {
     const saved = csv.appendDaily(slot, HEADERS, rows);
+    savedFiles.push(saved.file);
     stats.rowsSaved = saved.added;
     log(`CSV 저장: ${saved.file} (${saved.added}행 추가${saved.added < rows.length ? `, 중복 ${rows.length - saved.added}행 제외` : ''})`);
   } catch (e) {
@@ -137,13 +140,14 @@ async function main() {
     stats.detailSuccess, stats.detailFailed, stats.detailSkipped, stats.rowsSaved,
     missingText || '-', failureSummary() || '-', stats.warnings.join(' / ').slice(0, 1000) || '-',
   ];
-  csv.appendRunLog(slot, LOG_HEADERS, logRow);
+  savedFiles.push(csv.appendRunLog(slot, LOG_HEADERS, logRow).file);
   csv.saveRunJson(stamp, { ...Object.fromEntries(LOG_HEADERS.map((h, i) => [h, logRow[i]])), 실패상세: stats.failures });
 
   if (driveReady) {
     try {
-      for (const rel of relPaths) await drive.push(rel, config.DATA_DIR);
-      log(`구글 드라이브 저장 완료 (${drive.authMode()}): ${relPaths.join(', ')}`);
+      const uploadRels = savedFiles.map((f) => path.relative(config.DATA_DIR, f).split(path.sep).join('/'));
+      for (const rel of uploadRels) await drive.push(rel, config.DATA_DIR);
+      log(`구글 드라이브 저장 완료 (${drive.authMode()}): ${uploadRels.join(', ')}`);
     } catch (e) {
       const hint =
         drive.authMode() === '서비스계정' && /quota|not found/i.test(e.message)

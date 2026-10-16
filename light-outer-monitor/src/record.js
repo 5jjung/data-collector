@@ -33,7 +33,7 @@ const COLUMNS = [
   ['브랜드명', (r) => r.list.brandName],
   ['브랜드코드', (r) => r.list.brandCode],
   ['상품URL', (r) => r.list.productUrl],
-  ['아우터판정근거', (r) => r.outerReason],
+  ['판정근거', (r) => r.outerReason], // 아우터/경량 판정 근거 (카테고리 또는 상품명 키워드)
 
   // ── 랭킹 목록에 표시된 값 ──
   ['목록_정상가', (r) => r.list.normalPrice],
