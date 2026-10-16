@@ -145,10 +145,14 @@ async function main() {
       for (const rel of relPaths) await drive.push(rel, config.DATA_DIR);
       log(`구글 드라이브 저장 완료 (${drive.authMode()}): ${relPaths.join(', ')}`);
     } catch (e) {
-      const hint = /quota/i.test(e.message)
-        ? ' (서비스계정은 "내 드라이브"에 저장 불가 → README 3-1 의 GDRIVE_* Secrets 를 넣거나 폴더를 공유 드라이브로 옮기세요)'
-        : '';
+      const hint =
+        drive.authMode() === '서비스계정' && /quota|not found/i.test(e.message)
+          ? ' (서비스계정은 "내 드라이브" 폴더에 저장할 수 없음 → README 3-1 의 GDRIVE_* Secrets 를 넣으세요)'
+          : '';
       fail('드라이브', null, `올리기 실패: ${e.message}${hint}`);
+      // 요약/Summary 에 드라이브 실패가 보이도록 상태·실패원인 갱신 (CSV 사본은 Artifacts 에 남음)
+      logRow[4] = '부분성공';
+      logRow[15] = failureSummary();
     }
   }
 
