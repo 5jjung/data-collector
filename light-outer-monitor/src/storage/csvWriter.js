@@ -53,7 +53,8 @@ function appendCsv(filePath, headers, rows, dedupe = true) {
   for (let v = 2; fs.existsSync(target) && readExisting(target).header !== toLine(headers); v++) {
     target = filePath.replace(/\.csv$/, `_v${v}.csv`);
   }
-  if (target !== filePath) warn(`컬럼 구성이 바뀌어 새 파일에 저장합니다: ${path.basename(target)}`);
+  // 새 버전 파일을 처음 만들 때만 알림 (이후 회차는 그 파일에 이어 붙임)
+  if (target !== filePath && !fs.existsSync(target)) warn(`컬럼 구성이 바뀌어 새 파일에 저장합니다: ${path.basename(target)}`);
 
   if (!fs.existsSync(target)) {
     writeCsv(target, headers, rows);

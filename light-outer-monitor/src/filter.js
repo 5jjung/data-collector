@@ -6,7 +6,8 @@
 // 2단계(상세) 판정: 아래 두 조건을 모두 만족하면 저장
 //   ① 아우터인가  : 카테고리 경로에 "아우터" 또는 대분류 002 (못 읽으면 상품명 아우터 키워드로 추정)
 //   ② 경량인가    : 카테고리 경로에 "경량" (예: "패딩/헤비 아우터 > 경량 패딩")
-//                   또는 상품명에 LIGHT_NAME_KEYWORDS(경량/라이트/씬/미드웨이트 …)
+//                   또는 상품명에 "경량" / 수동 포함 목록(FORCE_INCLUDE)
+//                   또는 상품명에 라이트/씬/미드웨이트 등 + 패딩류 (색상명 "라이트 그레이" 등은 제외)
 // 판정 근거는 "판정근거" 컬럼에 기록됩니다. (예: "아우터: 카테고리 … / 경량: 카테고리 경량 패딩")
 //
 // ✏️ 키워드는 config.js 에서 수정
@@ -38,14 +39,33 @@ function judgeOuter(item, detail) {
   return { ok: false, reason: '카테고리 미확인 + 아우터 키워드 없음' };
 }
 
+// 색상명/단어 일부로 쓰인 "라이트·light" 는 경량 키워드로 보지 않음
+//   예) "[라이트 그레이]", "Light gray", "라이트블루", "Flight Jacket", "하이라이터"
+const COLOR_WORDS = '그레이|그레이쉬|블루|브라운|크림슨|인디고|베이지|핑크|카키|네이비|퍼플|그린|민트|옐로우|오렌지|레드|아이보리|차콜|멜란지|올리브|스카이|gr[ae]y|blue|brown|beige|pink|khaki|navy|purple|green|mint|yellow|orange|red|ivory|olive';
+function stripNonLightWords(name) {
+  return String(name || '')
+    .replace(new RegExp(`(라이트|light)\\s*-?\\s*(${COLOR_WORDS})`, 'gi'), ' ')
+    .replace(/(flight|highlight|하이라이트|하이라이터|라이트쇼)/gi, ' ');
+}
+
 /** ② 경량 판정 */
 function judgeLight(item, detail) {
   const catName = detail && detail.ok ? detail.categoryName : null;
+  // 1) 카테고리 경로에 "경량" (예: 패딩/헤비 아우터 > 경량 패딩)
   const catKw = catName ? config.LIGHT_CATEGORY_KEYWORDS.find((k) => catName.includes(k)) : null;
   if (catKw) return { ok: true, reason: `카테고리 "${catKw}"` };
-  const kw = findKeyword(item.goodsName, config.LIGHT_NAME_KEYWORDS);
-  if (kw) return { ok: true, reason: `상품명 "${kw}"` };
-  return { ok: false, reason: catName ? `카테고리 "${catName}" + 상품명에 경량 키워드 없음` : '상품명에 경량 키워드 없음' };
+  // 2) 상품명에 "경량"
+  if (normalize(item.goodsName).includes('경량')) return { ok: true, reason: '상품명 "경량"' };
+  // 3) 수동 포함 목록
+  const forced = config.FORCE_INCLUDE.find((k) => item.goodsNo === String(k) || normalize(item.goodsName).includes(normalize(k)));
+  if (forced) return { ok: true, reason: `수동 포함 목록 "${forced}"` };
+  // 4) 상품명 경량 단어(라이트/씬/미드웨이트 …) + 패딩류
+  const cleaned = stripNonLightWords(item.goodsName);
+  const kw = findKeyword(cleaned, config.LIGHT_NAME_KEYWORDS);
+  const padding = (catName && /패딩/.test(catName)) || findKeyword(item.goodsName, config.PADDING_KEYWORDS);
+  if (kw && padding) return { ok: true, reason: `상품명 "${kw}" + 패딩류` };
+  const why = kw ? `상품명 "${kw}" 있으나 패딩류 아님` : '경량 키워드 없음';
+  return { ok: false, reason: catName ? `카테고리 "${catName}" + ${why}` : why };
 }
 
 /**
@@ -79,4 +99,4 @@ function planDetailTargets(candidates, slotIdx) {
   };
 }
 
-module.exports = { isCandidate, judgeOuter, judgeLight, judgeTarget, planDetailTargets };
+module.exports = { isCandidate, judgeOuter, judgeLight, judgeTarget, planDetailTargets, stripNonLightWords };

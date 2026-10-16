@@ -114,7 +114,7 @@ async function main() {
     warn('구글 드라이브 설정(GDRIVE_* Secrets)이 없어 드라이브 저장을 건너뜁니다. CSV 는 Artifacts 에만 남습니다.');
   } else {
     try {
-      for (const rel of relPaths) await drive.pull(rel, config.DATA_DIR);
+      for (const rel of relPaths) await drive.pullAll(rel, config.DATA_DIR);
     } catch (e) {
       // 기존 파일을 못 받은 상태에서 올리면 드라이브 데이터를 덮어쓰게 되므로 올리기 중단
       driveReady = false;
@@ -122,8 +122,10 @@ async function main() {
     }
   }
 
+  const savedFiles = []; // 드라이브에 올릴 실제 파일 (컬럼 변경 시 _v2 등)
   try {
     const saved = csv.appendDaily(slot, HEADERS, rows);
+    savedFiles.push(saved.file);
     stats.rowsSaved = saved.added;
     log(`CSV 저장: ${saved.file} (${saved.added}행 추가${saved.added < rows.length ? `, 중복 ${rows.length - saved.added}행 제외` : ''})`);
   } catch (e) {
@@ -138,13 +140,14 @@ async function main() {
     stats.detailSuccess, stats.detailFailed, stats.detailSkipped, stats.rowsSaved,
     missingText || '-', failureSummary() || '-', stats.warnings.join(' / ').slice(0, 1000) || '-',
   ];
-  csv.appendRunLog(slot, LOG_HEADERS, logRow);
+  savedFiles.push(csv.appendRunLog(slot, LOG_HEADERS, logRow).file);
   csv.saveRunJson(stamp, { ...Object.fromEntries(LOG_HEADERS.map((h, i) => [h, logRow[i]])), 실패상세: stats.failures });
 
   if (driveReady) {
     try {
-      for (const rel of relPaths) await drive.push(rel, config.DATA_DIR);
-      log(`구글 드라이브 저장 완료 (${drive.authMode()}): ${relPaths.join(', ')}`);
+      const uploadRels = savedFiles.map((f) => path.relative(config.DATA_DIR, f).split(path.sep).join('/'));
+      for (const rel of uploadRels) await drive.push(rel, config.DATA_DIR);
+      log(`구글 드라이브 저장 완료 (${drive.authMode()}): ${uploadRels.join(', ')}`);
     } catch (e) {
       const hint =
         drive.authMode() === '서비스계정' && /quota|not found/i.test(e.message)
