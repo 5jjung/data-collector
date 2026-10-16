@@ -80,12 +80,22 @@ module.exports = {
   // 화면에 없는 값은 0 대신 이 문자열로 저장 (요청사항: NULL)
   NULL_TEXT: 'NULL',
 
-  // 누적 CSV 저장 폴더 (하루 1파일 + 월별 수집로그)
-  //   GitHub Actions 에서는 데이터 브랜치(light-outer-data)를 받아둔 폴더로 지정됨 (워크플로 참고)
-  DATA_DIR: process.env.DATA_DIR || 'data',
-
-  // 회차별 임시 파일(랭킹 500위 전체, 실패 상세, 진단) 폴더 → Artifacts 로 30일 보관
+  // 회차별 파일(랭킹 500위 전체, 실패 상세, 진단) 폴더 → GitHub Actions Artifacts 로 30일 보관
   OUTPUT_DIR: process.env.OUTPUT_DIR || 'output',
+
+  // 누적 CSV 작업 폴더 (드라이브에서 받아와 → 이어 붙이고 → 다시 올림)
+  //   OUTPUT_DIR 안에 두어 Artifacts 에도 백업되도록 함
+  DATA_DIR: process.env.DATA_DIR || 'output/누적',
+
+  // 구글 드라이브 저장 폴더 ID (폴더 주소 .../folders/<이 부분>)
+  //   ✏️ 저장 폴더를 바꾸려면 GitHub Variables 의 GDRIVE_FOLDER_ID 또는 아래 기본값 수정
+  DRIVE_FOLDER_ID: process.env.GDRIVE_FOLDER_ID || '1I8n7B6jjNo2crHRObdub_UZdrEDcyU9g',
+
+  // 드라이브 인증 (GitHub Secrets 로만 넣을 것 — 코드에 직접 쓰지 말 것)
+  GDRIVE_CLIENT_ID: process.env.GDRIVE_CLIENT_ID || '',
+  GDRIVE_CLIENT_SECRET: process.env.GDRIVE_CLIENT_SECRET || '',
+  GDRIVE_REFRESH_TOKEN: process.env.GDRIVE_REFRESH_TOKEN || '',
+  GOOGLE_SERVICE_ACCOUNT_JSON: process.env.GOOGLE_SERVICE_ACCOUNT_JSON || '', // 공유 드라이브일 때만 사용 가능
 
   // ─────────────────────────────────────────
   // 6. 브라우저

@@ -21,10 +21,11 @@ async function newContext(browser) {
     timezoneId: config.TIMEZONE,
     extraHTTPHeaders: { 'Accept-Language': 'ko-KR,ko;q=0.9' },
   });
-  // 이미지/폰트/영상은 불러오지 않아 속도와 트래픽을 줄임 (텍스트 수집에는 불필요)
+  // 이미지/영상은 불러오지 않아 속도와 트래픽을 줄임 (텍스트 수집에는 불필요)
+  //  ※ 폰트는 막으면 스크린샷이 폰트 로딩을 기다리다 멈추므로 허용
   await context.route('**/*', (route) => {
     const t = route.request().resourceType();
-    if (t === 'image' || t === 'font' || t === 'media') return route.abort();
+    if (t === 'image' || t === 'media') return route.abort();
     return route.continue();
   });
   return context;
