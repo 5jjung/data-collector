@@ -566,24 +566,33 @@ const API = 'https://goods-detail.musinsa.com/api2/goods/';
 const HEAD = {'Accept':'application/json','Referer':'https://www.musinsa.com/','User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0 Safari/537.36'};
 // 품절 설정은 이 파일에서만 관리 (GitHub에서 변경)
 const STOCK_CONFIG = Object.freeze({
-  remindHours: 3, remindStart: 9, remindEnd: 20,
-  changeStart: 9, changeEnd: 20,
+  // 한국시간 기준: 평일 09:00~12:00 / 13:30~18:00만 Slack 알림
+  notifyStart: 9, notifyEnd: 18, lunchStart: 12, lunchEndHour: 13, lunchEndMinute: 30,
+  urgentHour: 15, urgentWindowMinutes: 60,
+  stockIntervalMinutes: 30,
+  // 반복 알림은 15시 긴급 점검으로 대체 (일반 상태변동 알림은 계속 사용)
+  remindHours: 0,
   sizeRemind: true, restockAlert: true,
   // 첫 조회 시 품절 상태는 상태 저장만 하고, 다음 실행부터 변동 감지
 });
 const NAMES = {legacyProducts:'품절_상품목록',legacySettings:'품절_설정',log:'품절_알림기록',state:'품절_상태저장',seasons:'시즌설정',owners:'담당자 관리',registry:'상품등록',pending:'품절_대기알림',history:'통합이력'};
-const REG_HEADER=['시즌','상품번호','상품명','감시 ON/OFF'];
+const REG_HEADER=['시즌','상품번호','상품명','감시 ON/OFF','URL'];
+const SOURCE_SHEET_ID='1TJJhGn4IQzA0uYnoeHJhJdlJGrjn6T2uxJZrtUbotgo';
+const SOURCE_GID=1547145187;
+const IMPORT_SEASON='26FW';
 const SEASON_HEADER=['시즌','감시 ON/OFF','설명'];
 const OWNER_HEADER=['담당자명','Slack 멤버 ID','사용 여부'];
 const SEASON_RE=/^\d{2}(SS|FW)$/;
 const BASE_SEASON_HEADER=['상품번호','상품명','감시 여부','판매 상태','품절 옵션','판매중 옵션','문제 발생 시각','마지막 알림','마지막 확인','현재 좋아요','직전 좋아요','좋아요 증감','오늘 좋아요 증가','최근 보는 사람 수','리스팅 이탈 여부','이탈 구분','이탈 날짜','마지막 좋아요'];
 const SEASON_LOG_HEADER=['시각','종류','상품번호','상품명','내용','상품 URL'];
-const OPTION_START=4; // 상품등록 E열부터 실제 옵션명 헤더를 동적으로 추가
+const OPTION_START=5; // 상품등록 F열부터 실제 옵션명 헤더를 동적으로 추가 (E열 URL)
 const STATE_HEADER=['상품번호','이전 상태 JSON','옵션 캐시 JSON','업데이트 시각'];
 const LOG_HEADER=['시각','종류','상품명','내용','URL'];
 const TZ='Asia/Seoul';
 const fmt=d=>new Intl.DateTimeFormat('sv-SE',{timeZone:TZ,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).format(d).replace(' ',' ');
 const hour=d=>Number(new Intl.DateTimeFormat('en-US',{timeZone:TZ,hour:'numeric',hourCycle:'h23'}).format(d));
+const kstParts=d=>{const p=Object.fromEntries(new Intl.DateTimeFormat('en-US',{timeZone:TZ,year:'numeric',month:'2-digit',day:'2-digit',weekday:'short',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(d).filter(x=>x.type!=='literal').map(x=>[x.type,x.value]));return {date:`${p.year}-${p.month}-${p.day}`,weekday:p.weekday,hour:Number(p.hour),minute:Number(p.minute)};};
+const alertAllowed=(d)=>{const p=kstParts(d);const min=p.hour*60+p.minute;return !['Sat','Sun'].includes(p.weekday)&&min>=STOCK_CONFIG.notifyStart*60&&min<STOCK_CONFIG.notifyEnd*60&&!(min>=STOCK_CONFIG.lunchStart*60&&min<STOCK_CONFIG.lunchEndHour*60+STOCK_CONFIG.lunchEndMinute);};
 const inHours=(h,a,b)=>a===b?false:(a<b?h>=a&&h<b:h>=a||h<b);
 const truth=v=>/^(예|y|yes|o|true|on|1)$/i.test(String(v||'').trim());
 const split=v=>String(v||'').split(',').map(x=>x.trim().toLowerCase()).filter(Boolean);
@@ -605,6 +614,9 @@ const read=async(range)=>((await sheets.spreadsheets.values.get({spreadsheetId:I
 const put=async(range,values)=>sheets.spreadsheets.values.update({spreadsheetId:ID,range,valueInputOption:'RAW',requestBody:{values}});
 const ensureHeader=async(name,header)=>{const rows=await read(`'${name}'!A1:${String.fromCharCode(64+header.length)}1`);if(!rows.length||!rows[0].some(x=>String(x).trim()))await put(`'${name}'!A1`,[header]);else if(header.some((h,i)=>rows[0][i]!==h))throw Error(`${name} 헤더가 예상 구조와 다릅니다. 기존 데이터를 보호하기 위해 중단합니다.`);};
 // 기존 시트는 절대 삭제/초기화하지 않는다. 기존 이름 탭도 보존한다.
+// 기존 상품등록 A:D는 보존하고 E열이 비어 있을 때만 URL 헤더 추가.
+const oldRegistryHeader=(await read(`'${NAMES.registry}'!A1:ZZ1`))[0]||[];
+if(oldRegistryHeader[4]&&oldRegistryHeader[4]!=='URL')throw Error('상품등록 E열에 기존 옵션이 있어 자동 이전을 중단합니다.');
 await ensureHeader(NAMES.registry,REG_HEADER);
 await ensureHeader(NAMES.seasons,SEASON_HEADER);
 await ensureHeader(NAMES.owners,OWNER_HEADER);
@@ -621,10 +633,38 @@ const ownerRows=await read(`'${NAMES.owners}'!A2:C`);
 const memberId=/^[UW][A-Z0-9]{6,}$/;
 const activeOwners=ownerRows.filter(r=>r[0]&&!['OFF','FALSE','아니오','0'].includes(String(r[2]||'ON').trim().toUpperCase()));
 const ownerMentions=()=>activeOwners.map(r=>memberId.test(String(r[1]||''))?`<@${r[1]}>`:esc(r[0])).join(' ');
-const now=new Date(),stamp=fmt(now),h=hour(now);
-const changeOpen=inHours(h,STOCK_CONFIG.changeStart,STOCK_CONFIG.changeEnd);
-const remindOpen=inHours(h,STOCK_CONFIG.remindStart,STOCK_CONFIG.remindEnd);
-const remindMs=Math.max(.5,STOCK_CONFIG.remindHours)*3600000;
+const now=new Date(),stamp=fmt(now),kst=kstParts(now);
+const changeOpen=alertAllowed(now);
+const remindOpen=false; // 일반 재알림은 비활성화, 15시 긴급 점검만 사용
+const remindMs=Infinity;
+const urgentOpen=changeOpen&&kst.hour===STOCK_CONFIG.urgentHour&&kst.minute<STOCK_CONFIG.urgentWindowMinutes;
+// 원본 문서에서 gid로 정확한 탭을 찾아 읽는다. 원본 문서는 수정하지 않는다.
+// 원본 상품번호는 URL / 숫자 / HYPERLINK 문자열 중 어느 형식이어도 숫자만 추출한다.
+const sourceMeta=await sheets.spreadsheets.get({spreadsheetId:SOURCE_SHEET_ID,fields:'sheets(properties(sheetId,title))'});
+const sourceTab=(sourceMeta.data.sheets||[]).find(x=>x.properties.sheetId===SOURCE_GID)?.properties.title;
+if(!sourceTab)throw Error(`원본 상품목록 gid ${SOURCE_GID}를 찾을 수 없습니다.`);
+const sourceValues=(await sheets.spreadsheets.values.get({spreadsheetId:SOURCE_SHEET_ID,range:`'${sourceTab.replace(/'/g,"''")}'!A1:Z`,valueRenderOption:'FORMATTED_VALUE'})).data.values||[];
+const existingRegistry=await read(`'${NAMES.registry}'!A2:E`);
+const parseNo=v=>{const x=String(v??'').trim();const m=x.match(/(?:musinsa\.com\/(?:products|app\/goods)\/|goodsNo[=:]|^)(\d{5,})(?!\d)/i);return m?m[1]:null;};
+const seen=new Set(existingRegistry.map(r=>parseNo(r[1])).filter(Boolean));
+const incoming=[];
+for(const row of sourceValues.slice(1)){
+  const goodsNo=parseNo(row[0])||parseNo(row[1]);
+  if(!goodsNo||seen.has(goodsNo))continue;
+  // 원본: A 상품 URL, F 상품명 (기존 품절_상품목록 구조)
+  const name=String(row[5]||'').trim()||String(row[1]||'').trim().replace(/^\d{5,}$/,'');
+  incoming.push([IMPORT_SEASON,goodsNo,name,false,`=IF(B${existingRegistry.length+incoming.length+2}=\"\",\"\",\"https://www.musinsa.com/products/\"&B${existingRegistry.length+incoming.length+2})`]);
+  seen.add(goodsNo);
+}
+if(incoming.length){
+  await sheets.spreadsheets.values.update({spreadsheetId:ID,range:`'${NAMES.registry}'!A${existingRegistry.length+2}`,valueInputOption:'USER_ENTERED',requestBody:{values:incoming}});
+}
+console.log(`원본 상품목록 읽기 성공: 신규 ${incoming.length}개 등록 (기본 감시 OFF)`);
+// 이미 등록된 상품에도 URL 수식을 채우되 기존 사용자 입력은 덮어쓰지 않는다.
+const currentRegistry=await read(`'${NAMES.registry}'!A2:E`);
+const urlUpdates=[];
+for(let i=0;i<currentRegistry.length;i++)if(parseNo(currentRegistry[i][1])&&!currentRegistry[i][4])urlUpdates.push({range:`'${NAMES.registry}'!E${i+2}`,values:[[ `=IF(B${i+2}=\"\",\"\",\"https://www.musinsa.com/products/\"&B${i+2})` ]]});
+for(let i=0;i<urlUpdates.length;i+=100)await sheets.spreadsheets.values.batchUpdate({spreadsheetId:ID,requestBody:{valueInputOption:'USER_ENTERED',data:urlUpdates.slice(i,i+100)}});
 const rows=await read(`'${NAMES.registry}'!A2:ZZ`);
 const stateRows=await read(`'${NAMES.state}'!A2:D`);
 const state=new Map(stateRows.filter(r=>r[0]).map(r=>[String(r[0]),{old:safeJSON(r[1]),cache:safeJSON(r[2])}]));
@@ -637,9 +677,9 @@ for(const season of allSeasons)await ensureHeader(season,BASE_SEASON_HEADER);
 await ensureHeader(NAMES.history,['시각','시즌','종류','상품번호','상품명','내용','상품 URL']);
 // 상품등록: 옵션은 상품 API가 제공한 실제 옵션명으로만 열을 추가한다.
 // 옵션별 체크는 기본 TRUE로 초기화하고, 사용자가 해제하면 이후 자동 실행에서 유지한다.
-let optionHeaders=(await read(`'${NAMES.registry}'!E1:ZZ1`))[0]||[];
+let optionHeaders=(await read(`'${NAMES.registry}'!F1:ZZ1`))[0]||[];
 const optionColumn=new Map(optionHeaders.map((v,i)=>[String(v),OPTION_START+i]).filter(x=>x[0]));
-const candidate=productRows.filter(r=>r.goodsNo);
+const candidate=productRows.filter(r=>r.goodsNo&&r.enabled&&r.season==='26FW'&&seasonMap.get('26FW')===true); // 감시 OFF 대량 이관 상품은 API 조회하지 않음
 const fetched=new Map();
 for(const g of [...new Set(candidate.map(r=>r.goodsNo))]){
   const cur=await getProduct(g,state.get(g)?.cache);
@@ -685,18 +725,24 @@ for(const r of candidate){const cur=fetched.get(r.goodsNo);if(!cur||cur.error||c
 for(let i=0;i<checkboxRequests.length;i+=100)await sheets.spreadsheets.batchUpdate({spreadsheetId:ID,requestBody:{requests:checkboxRequests.slice(i,i+100)}});
 for(let i=0;i<optionCellWrites.length;i+=100)await sheets.spreadsheets.values.batchUpdate({spreadsheetId:ID,requestBody:{valueInputOption:'RAW',data:optionCellWrites.slice(i,i+100)}});
 // 시즌 OFF 또는 상품 OFF면 감시 중단. 사이즈는 실제 옵션 중 체크된 항목만 감시.
-for(const r of productRows){const cur=fetched.get(r.goodsNo);r.w={only:[],skip:[]};if(cur&&!cur.error){for(const opt of Object.keys(cur.sizes||{})){const idx=optionColumn.get(opt);const v=r.raw[idx];if(v===false||String(v).toUpperCase()==='FALSE')r.w.skip.push(opt.toLowerCase());else r.w.only.push(opt.toLowerCase());}}}
+for(const r of productRows){const cur=fetched.get(r.goodsNo);r.w={only:[],skip:[]};if(cur&&!cur.error){for(const opt of Object.keys(cur.sizes||{})){const idx=optionColumn.get(opt);const v=r.raw[idx];if(v===false||String(v).toUpperCase()==='FALSE')r.w.skip.push(opt.toLowerCase());else r.w.only.push(opt.toLowerCase());}if(Object.keys(cur.sizes||{}).length&&!r.w.only.length)r.w.only=['__NO_OPTIONS_SELECTED__'];}}
 const grouped=new Map();for(const r of productRows){if(r.goodsNo&&r.enabled&&r.season==='26FW'&&seasonMap.get(r.season)===true){if(!grouped.has(r.goodsNo))grouped.set(r.goodsNo,[]);grouped.get(r.goodsNo).push(r);}}
-const alerts=[],reminders=[],logs=[],seasonLogs=new Map();let pending=(await read(`'${NAMES.pending}'!A2:C`)).filter(r=>r[1]&&r[2]).map(r=>({g:String(r[1]),line:String(r[2])}));const nextState=new Map(state);
+const alerts=[],reminders=[],urgents=[],urgentGoods=[],logs=[],seasonLogs=new Map();let pending=(await read(`'${NAMES.pending}'!A2:C`)).filter(r=>r[1]&&r[2]).map(r=>({g:String(r[1]),line:String(r[2])}));const nextState=new Map(state);
 for(const [g,group] of grouped){const stored=state.get(g)||{};const cur=fetched.get(g)||await getProduct(g,stored.cache);if(cur.error){console.warn(`상품 ${g} 조회 실패: ${cur.error}`);for(const r of group)r.out=[stored.old?.name||'',`❓ 확인 실패 (${cur.error})`,'','','','',stamp];continue;}
 const old=stored.old;
 // 단발성 404는 삭제로 확정하지 않는다. 2회 연속 404일 때만 확정.
 if(cur.status==='GONE'&&old?.status!=='GONE'&&(old?.goneCount||0)<1){const pendingOld={...old,goneCount:(old.goneCount||0)+1};nextState.set(g,{old:pendingOld,cache:stored.cache});for(const r of group)r.out=[old?.name||'','❓ 삭제 여부 재확인 중','','','','',stamp];continue;}
-const merged={name:cur.status==='GONE'&&old?old.name:(cur.name||group[0].enteredName||g),status:cur.status,sizes:cur.status==='GONE'&&old?old.sizes:cur.sizes,issueSince:old?.issueSince||null,lastAlert:old?.lastAlert||null,goneCount:cur.status==='GONE'?(old?.goneCount||0)+1:0};const watch={only:[],skip:[]}; // All monitored rows contribute; each row retains its own filtering.
+const merged={name:cur.status==='GONE'&&old?old.name:(cur.name||group[0].enteredName||g),status:cur.status,sizes:cur.status==='GONE'&&old?old.sizes:cur.sizes,issueSince:old?.issueSince||null,lastAlert:old?.lastAlert||null,goneCount:cur.status==='GONE'?(old?.goneCount||0)+1:0,lastUrgentDate:old?.lastUrgentDate||null};const watch={only:[],skip:[]}; // All monitored rows contribute; each row retains its own filtering.
 const issues=group.map(r=>issue(merged,r.w,STOCK_CONFIG.sizeRemind)).filter(Boolean);const hasIssue=issues.length>0;if(!hasIssue){merged.issueSince=null;merged.lastAlert=null;}else if(!merged.issueSince)merged.issueSince=now.getTime();
 const messages=old?[...new Set(group.flatMap(r=>diff(old,merged,r.w,STOCK_CONFIG.restockAlert)))]:[];const who=ownerMentions();const line=(message)=>`• <${url(g)}|${esc(merged.name)}> — ${message}${who?' '+who:''}`;
 if(messages.length){const message=messages.join(' · ');const item=line(message);if(changeOpen){alerts.push(item);if(hasIssue)merged.lastAlert=now.getTime();}else{pending.push({g,line:`• [${new Intl.DateTimeFormat('en-GB',{timeZone:TZ,hour:'2-digit',minute:'2-digit'}).format(now)}] ${item.slice(2)}`});}logs.push([stamp,changeOpen?'변동':'변동(시간 외)',merged.name,message,url(g)]);for(const r of group){if(!seasonLogs.has(r.season))seasonLogs.set(r.season,[]);seasonLogs.get(r.season).push([stamp,changeOpen?'변동':'변동(시간 외)',g,merged.name,message,url(g),'']);}}
 if(hasIssue&&remindOpen&&(!merged.lastAlert||now.getTime()-merged.lastAlert>=remindMs)&&!(changeOpen&&pending.some(p=>p.g===g))){const hours=Math.floor((now.getTime()-merged.issueSince)/3600000);const msg=[...new Set(issues)].join(' · ')+(hours>=1?` (${hours}시간째 미해결)`:'');reminders.push(line(msg));logs.push([stamp,'재알림',merged.name,msg,url(g)]);for(const r of group){if(!seasonLogs.has(r.season))seasonLogs.set(r.season,[]);seasonLogs.get(r.season).push([stamp,'재알림',g,merged.name,msg,url(g),'']);}merged.lastAlert=now.getTime();}
+// 15:00 KST 최종 점검: 감시 ON + 시즌 ON + 미해결 상태만, 상품별 하루 한 번.
+if(urgentOpen&&hasIssue&&merged.lastUrgentDate!==kst.date){
+  const summary=[...new Set(issues)].join(' · ');
+  urgents.push(line(`🚨 *15시 MD 최종 확인 필요* — ${summary}`));
+  urgentGoods.push(g);
+}
 nextState.set(g,{old:merged,cache:cur.cache});for(const r of group){const keys=Object.keys(merged.sizes).filter(k=>watched(r.w,k));const sold=merged.status==='GONE'?[]:keys.filter(k=>!merged.sizes[k]);const available=merged.status==='GONE'?[]:keys.filter(k=>merged.sizes[k]);const status=merged.status==='SALE'&&sold.length?'사이즈 품절':ko[merged.status]||merged.status;r.out=[merged.name,(merged.status==='SALE'&&!sold.length?'✅ ':'🚫 ')+status,sold.join(', '),available.join(', '),merged.issueSince?fmt(new Date(merged.issueSince)):'',merged.lastAlert?fmt(new Date(merged.lastAlert)):'',stamp];}}
 // 기존 좋아요/리스팅 추적 탭은 읽기 전용. 시즌별 탭에 결합한다.
 const likeRows=byName.has('좋아요_현황')?await read(`'좋아요_현황'!A2:J`):[];
@@ -734,10 +780,16 @@ for(const season of allSeasons){
   console.log(`26FW 통합 현황: 기존 행 보존, ${updates.length}개 상품 연결/갱신`);
 }
 // Keep prior rows for excluded products, remove rows for deleted products only.
-const all=Array.from(nextState.entries()).map(([g,v])=>[g,JSON.stringify(v.old||null),JSON.stringify(v.cache||null),stamp]);await sheets.spreadsheets.values.clear({spreadsheetId:ID,range:`'${NAMES.state}'!A2:D`});if(all.length)await put(`'${NAMES.state}'!A2`,all);
+// 상태 저장은 Slack 긴급 알림 전송 결과를 반영한 후 수행한다.
 const webhook=process.env.SLACK_WEBHOOK_STOCK||process.env.SLACK_WEBHOOK_URL||'';async function send(title,lines){if(!lines.length)return true;if(!webhook){console.warn('Slack Webhook 없음: 알림 미발송');return false;}for(let i=0;i<lines.length;i+=30){const res=await fetch(webhook,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:(i===0?title+'\n':'')+lines.slice(i,i+30).join('\n'),unfurl_links:false})});if(!res.ok){console.error(`Slack 오류 HTTP ${res.status}`);return false;}}return true;}
 let delivered=[];if(changeOpen&&pending.length){const held=pending.slice(0,30).map(x=>x.line);if(pending.length>30)held.push(`…외 ${pending.length-30}건`);if(await send(`🌙 *알림 시간 외 변동* (${pending.length}건)`,held)){delivered=pending;pending=[];}}
 await send(`🔔 *무신사 상품 변동* (${alerts.length}건)`,alerts);await send(`⏰ *아직 해결 안 된 상품* (${reminders.length}건)`,reminders);
+const urgentDelivered=await send(`🚨 *15:00 MD 승인/조치 최종 확인* (${urgents.length}건)`,urgents);
+if(urgentDelivered&&urgents.length){for(const g of urgentGoods){const item=nextState.get(g);if(item?.old)item.old.lastUrgentDate=kst.date;}
+  const urgentLog=urgentGoods.map(g=>[stamp,'15시 긴급 점검',nextState.get(g)?.old?.name||g,'미해결 상태 MD 확인 요청',url(g)]);logs.push(...urgentLog);
+  for(const g of urgentGoods){seasonLogs.set('26FW',[...(seasonLogs.get('26FW')||[]),[stamp,'15시 긴급 점검',g,nextState.get(g)?.old?.name||g,'미해결 상태 MD 확인 요청',url(g),'']]);}
+}
+const all=Array.from(nextState.entries()).map(([g,v])=>[g,JSON.stringify(v.old||null),JSON.stringify(v.cache||null),stamp]);await sheets.spreadsheets.values.clear({spreadsheetId:ID,range:`'${NAMES.state}'!A2:D`});if(all.length)await put(`'${NAMES.state}'!A2`,all);
 // 대기 알림은 별도 탭에 저장 (기존 품절_설정 탭은 읽거나 수정하지 않는다).
 await sheets.spreadsheets.values.clear({spreadsheetId:ID,range:`'${NAMES.pending}'!A2:C`});
 if(pending.length)await put(`'${NAMES.pending}'!A2`,pending.slice(-100).map(p=>[stamp,p.g,p.line]));
@@ -751,13 +803,13 @@ return main;
 })();
 
 // =============== 단일 파일 실행 관리자 ===============
-// 예약 실행: 매 10분 품절, UTC 분이 00/30이면 기존 시청자도 실행
+// 예약 실행: 30분마다 품절/시청자 체크. 알림 발송은 KST 평일 업무시간만
 // 수동 실행: mode=both/viewer/stock (기본 both)
 async function runIntegrated() {
   const mode = (process.env.MONITOR_MODE || 'auto').toLowerCase();
   const minute = new Date().getUTCMinutes();
   const doViewer = mode === 'both' || mode === 'viewer' || (mode === 'auto' && minute % 30 < 10);
-  const doStock = mode === 'both' || mode === 'stock' || mode === 'auto';
+  const doStock = mode === 'both' || mode === 'stock' || (mode === 'auto' && minute % 30 < 10);
   const errors = [];
   if (doViewer) {
     try { await main(); } catch (e) { console.error('[시청자 모니터링 실패]', e); errors.push(e); }
