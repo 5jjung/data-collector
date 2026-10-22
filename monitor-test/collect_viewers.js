@@ -689,10 +689,15 @@ await ensureHeader(NAMES.history,['시각','시즌','종류','상품번호','상
 let optionHeaders=(await read(`'${NAMES.registry}'!F1:ZZ1`))[0]||[];
 const optionColumn=new Map(optionHeaders.map((v,i)=>[String(v),OPTION_START+i]).filter(x=>x[0]));
 const candidate=productRows.filter(r=>r.goodsNo&&r.enabled&&r.season==='26FW'&&seasonMap.get('26FW')===true); // 감시 OFF 대량 이관 상품은 API 조회하지 않음
+console.log('[진단] 시즌설정 26FW:', JSON.stringify({value:seasonMap.get('26FW'),raw:seasonRows.find(r=>String(r[0]).trim()==='26FW')}));
+console.log('[진단] 상품등록:', JSON.stringify({total:productRows.length, validNumbers:productRows.filter(r=>r.goodsNo).length, checked:productRows.filter(r=>r.enabled).length, checked26FW:productRows.filter(r=>r.enabled&&r.season==='26FW').length, candidates:candidate.length}));
+console.log('[진단] 6885281:', JSON.stringify(productRows.find(r=>r.goodsNo==='6885281')||{message:'상품등록에서 번호를 찾지 못함'}));
+if(!candidate.length) console.warn('[진단] 실제 조회 대상 0개: 시즌 ON, 상품 감시 ON, 시즌 26FW, 상품번호 조건을 확인하세요.');
 const fetched=new Map();
 for(const g of [...new Set(candidate.map(r=>r.goodsNo))]){
   const cur=await getProduct(g,state.get(g)?.cache);
   fetched.set(g,cur);
+  console.log(`[진단] 옵션조회 ${g}: ${JSON.stringify({status:cur.status,error:cur.error||null,optionCount:Object.keys(cur.sizes||{}).length,options:Object.keys(cur.sizes||{}).slice(0,25)})}`);
   if(cur.error){console.warn(`상품 ${g} 조회 실패: ${cur.error}`);continue;}
   for(const opt of Object.keys(cur.sizes||{}))if(!optionColumn.has(opt)){
     const idx=OPTION_START+optionHeaders.length;
