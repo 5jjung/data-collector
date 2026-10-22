@@ -617,6 +617,15 @@ const ensureHeader=async(name,header)=>{const rows=await read(`'${name}'!A1:${St
 // 기존 상품등록 A:D는 보존하고 E열이 비어 있을 때만 URL 헤더 추가.
 const oldRegistryHeader=(await read(`'${NAMES.registry}'!A1:ZZ1`))[0]||[];
 if(oldRegistryHeader[4]&&oldRegistryHeader[4]!=='URL')throw Error('상품등록 E열에 기존 옵션이 있어 자동 이전을 중단합니다.');
+// 기존 A:D가 정상이고 E1이 비어 있다면 E1만 안전하게 채운다.
+// 기존 행과 옵션 데이터는 삭제하거나 덮어쓰지 않는다.
+const originalPrefix=REG_HEADER.slice(0,4);
+if(oldRegistryHeader.some(x=>String(x||'').trim())){
+  if(originalPrefix.some((h,i)=>String(oldRegistryHeader[i]||'').trim()!==h)){
+    throw Error(`상품등록 A:D 헤더 불일치. 실제: ${JSON.stringify(oldRegistryHeader.slice(0,5))}`);
+  }
+  if(!oldRegistryHeader[4])await put(`'${NAMES.registry}'!E1`,[['URL']]);
+}
 await ensureHeader(NAMES.registry,REG_HEADER);
 await ensureHeader(NAMES.seasons,SEASON_HEADER);
 await ensureHeader(NAMES.owners,OWNER_HEADER);
