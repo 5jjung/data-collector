@@ -571,7 +571,7 @@ const STOCK_CONFIG = Object.freeze({
   sizeRemind: true, restockAlert: true,
   // 첫 조회 시 품절 상태는 상태 저장만 하고, 다음 실행부터 변동 감지
 });
-const NAMES = {legacyProducts:'품절_상품목록',legacySettings:'품절_설정',log:'품절_알림기록',state:'품절_상태저장',seasons:'시즌설정',owners:'담당자 관리',registry:'상품등록',pending:'품절_대기알림'};
+const NAMES = {legacyProducts:'품절_상품목록',legacySettings:'품절_설정',log:'품절_알림기록',state:'품절_상태저장',seasons:'시즌설정',owners:'담당자 관리',registry:'상품등록',pending:'품절_대기알림',history:'통합이력'};
 const REG_HEADER=['시즌','상품번호','상품명','감시 ON/OFF'];
 const SEASON_HEADER=['시즌','감시 ON/OFF','설명'];
 const OWNER_HEADER=['담당자명','Slack 멤버 ID','사용 여부'];
@@ -600,7 +600,7 @@ const sizes={};if(options.length){const inv=await request(`${API}${g}/options/v2
 return {name:d.goodsNm||g,status,sizes,cache};}
 function issue(st,w,sizeRemind){if(st.status==='STAND_BY_SALE'||st.status==='UNKNOWN')return null;if(st.status!=='SALE')return '🚫 '+(ko[st.status]||st.status);if(!sizeRemind)return null;const missing=Object.keys(st.sizes).filter(k=>watched(w,k)&&!st.sizes[k]);return missing.length?'❌ '+missing.join(', ')+' 품절':null;}
 function diff(old,cur,w,restock){const out=[];if(old.status!==cur.status){if(cur.status==='SALE'){if(restock)out.push('✅ 판매 재개');}else out.push('🚫 '+(ko[cur.status]||cur.status));}if(cur.status==='GONE')return out;for(const [k,v] of Object.entries(cur.sizes)){if(!watched(w,k))continue;if(old.sizes?.[k]===true&&!v)out.push(`❌ ${k} 품절`);else if(old.sizes?.[k]===false&&v&&restock)out.push(`✅ ${k} 재입고`);}for(const [k,v] of Object.entries(old.sizes||{})){if(!(k in cur.sizes)&&v&&old.status!=='GONE'&&watched(w,k))out.push(`❌ ${k} 옵션 삭제`);}return out;}
-async function main(){if(!ID||!process.env.GOOGLE_SERVICE_ACCOUNT_JSON)throw Error('GOOGLE_SERVICE_ACCOUNT_JSON / VIEWER_SPREADSHEET_ID 필수');const credentials=JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);const auth=new google.auth.GoogleAuth({credentials,scopes:['https://www.googleapis.com/auth/spreadsheets']});const sheets=google.sheets({version:'v4',auth});const meta=await sheets.spreadsheets.get({spreadsheetId:ID});const byName=new Map((meta.data.sheets||[]).map(x=>[x.properties.title,x.properties.sheetId]));const missing=Object.values(NAMES).filter(n=>!byName.has(n));if(missing.length){const r=await sheets.spreadsheets.batchUpdate({spreadsheetId:ID,requestBody:{requests:missing.map(title=>({addSheet:{properties:{title}}}))}});for(const s of r.data.replies)byName.set(s.addSheet.properties.title,s.addSheet.properties.sheetId);}
+async function main(){if(!ID||!process.env.GOOGLE_SERVICE_ACCOUNT_JSON)throw Error('GOOGLE_SERVICE_ACCOUNT_JSON / VIEWER_SPREADSHEET_ID 필수');const credentials=JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);const auth=new google.auth.GoogleAuth({credentials,scopes:['https://www.googleapis.com/auth/spreadsheets']});const sheets=google.sheets({version:'v4',auth});const meta=await sheets.spreadsheets.get({spreadsheetId:ID});const byName=new Map((meta.data.sheets||[]).map(x=>[x.properties.title,x.properties.sheetId]));const needed=[NAMES.log,NAMES.state,NAMES.seasons,NAMES.owners,NAMES.registry,NAMES.pending,NAMES.history];const missing=needed.filter(n=>!byName.has(n));if(missing.length){const r=await sheets.spreadsheets.batchUpdate({spreadsheetId:ID,requestBody:{requests:missing.map(title=>({addSheet:{properties:{title}}}))}});for(const s of r.data.replies)byName.set(s.addSheet.properties.title,s.addSheet.properties.sheetId);}
 const read=async(range)=>((await sheets.spreadsheets.values.get({spreadsheetId:ID,range})).data.values||[]);
 const put=async(range,values)=>sheets.spreadsheets.values.update({spreadsheetId:ID,range,valueInputOption:'RAW',requestBody:{values}});
 const ensureHeader=async(name,header)=>{const rows=await read(`'${name}'!A1:${String.fromCharCode(64+header.length)}1`);if(!rows.length||!rows[0].some(x=>String(x).trim()))await put(`'${name}'!A1`,[header]);else if(header.some((h,i)=>rows[0][i]!==h))throw Error(`${name} 헤더가 예상 구조와 다릅니다. 기존 데이터를 보호하기 위해 중단합니다.`);};
@@ -614,7 +614,7 @@ const regHeader=(await read(`'${NAMES.registry}'!A1:ZZ1`))[0]||[];
 if(REG_HEADER.some((h,i)=>regHeader[i]!==h))throw Error('상품등록 헤더 불일치: 자동 이전하지 않고 중단합니다.');
 const seasonRows=await read(`'${NAMES.seasons}'!A2:C`);
 const seasonMap=new Map(seasonRows.filter(r=>SEASON_RE.test(String(r[0]||'').trim())).map(r=>[String(r[0]).trim(),truth(r[1])]));
-const suggested=['25SS','25FW','26SS','26FW','27SS','27FW'];
+const suggested=['26FW']; // 새 시즌은 26FW만 추가; 기존 시즌설정 행은 삭제하지 않음
 const newSeasons=suggested.filter(x=>!seasonMap.has(x)).map(x=>[x,'OFF','필요한 시즌만 ON으로 변경']);
 if(newSeasons.length){await put(`'${NAMES.seasons}'!A${seasonRows.length+2}`,newSeasons);for(const r of newSeasons)seasonMap.set(r[0],false);}
 const ownerRows=await read(`'${NAMES.owners}'!A2:C`);
@@ -629,11 +629,12 @@ const rows=await read(`'${NAMES.registry}'!A2:ZZ`);
 const stateRows=await read(`'${NAMES.state}'!A2:D`);
 const state=new Map(stateRows.filter(r=>r[0]).map(r=>[String(r[0]),{old:safeJSON(r[1]),cache:safeJSON(r[2])}]));
 const productRows=rows.map((r,i)=>({index:i,season:String(r[0]||'').trim().toUpperCase(),goodsNo:/^\d{5,}$/.test(String(r[1]||'').trim())?String(r[1]).trim():null,enteredName:String(r[2]||'').trim(),enabled:r[3]===true||truth(r[3]),raw:r}));
-const allSeasons=[...new Set([...seasonMap.keys(),...productRows.map(r=>r.season).filter(x=>SEASON_RE.test(x))])];
-const seasonTitles=allSeasons.flatMap(x=>[x,`${x}_이력`]);
+const allSeasons=['26FW']; // 다른 시즌 탭을 새로 만들지 않음
+const seasonTitles=['26FW'];
 const toCreate=seasonTitles.filter(x=>!byName.has(x));
 if(toCreate.length){const added=await sheets.spreadsheets.batchUpdate({spreadsheetId:ID,requestBody:{requests:toCreate.map(title=>({addSheet:{properties:{title}}}))}});for(const r of added.data.replies)byName.set(r.addSheet.properties.title,r.addSheet.properties.sheetId);}
-for(const season of allSeasons){await ensureHeader(season,BASE_SEASON_HEADER);await ensureHeader(`${season}_이력`,SEASON_LOG_HEADER);}
+for(const season of allSeasons)await ensureHeader(season,BASE_SEASON_HEADER);
+await ensureHeader(NAMES.history,['시각','시즌','종류','상품번호','상품명','내용','상품 URL']);
 // 상품등록: 옵션은 상품 API가 제공한 실제 옵션명으로만 열을 추가한다.
 // 옵션별 체크는 기본 TRUE로 초기화하고, 사용자가 해제하면 이후 자동 실행에서 유지한다.
 let optionHeaders=(await read(`'${NAMES.registry}'!E1:ZZ1`))[0]||[];
@@ -685,7 +686,7 @@ for(let i=0;i<checkboxRequests.length;i+=100)await sheets.spreadsheets.batchUpda
 for(let i=0;i<optionCellWrites.length;i+=100)await sheets.spreadsheets.values.batchUpdate({spreadsheetId:ID,requestBody:{valueInputOption:'RAW',data:optionCellWrites.slice(i,i+100)}});
 // 시즌 OFF 또는 상품 OFF면 감시 중단. 사이즈는 실제 옵션 중 체크된 항목만 감시.
 for(const r of productRows){const cur=fetched.get(r.goodsNo);r.w={only:[],skip:[]};if(cur&&!cur.error){for(const opt of Object.keys(cur.sizes||{})){const idx=optionColumn.get(opt);const v=r.raw[idx];if(v===false||String(v).toUpperCase()==='FALSE')r.w.skip.push(opt.toLowerCase());else r.w.only.push(opt.toLowerCase());}}}
-const grouped=new Map();for(const r of productRows){if(r.goodsNo&&r.enabled&&r.season&&seasonMap.get(r.season)===true){if(!grouped.has(r.goodsNo))grouped.set(r.goodsNo,[]);grouped.get(r.goodsNo).push(r);}}
+const grouped=new Map();for(const r of productRows){if(r.goodsNo&&r.enabled&&r.season==='26FW'&&seasonMap.get(r.season)===true){if(!grouped.has(r.goodsNo))grouped.set(r.goodsNo,[]);grouped.get(r.goodsNo).push(r);}}
 const alerts=[],reminders=[],logs=[],seasonLogs=new Map();let pending=(await read(`'${NAMES.pending}'!A2:C`)).filter(r=>r[1]&&r[2]).map(r=>({g:String(r[1]),line:String(r[2])}));const nextState=new Map(state);
 for(const [g,group] of grouped){const stored=state.get(g)||{};const cur=fetched.get(g)||await getProduct(g,stored.cache);if(cur.error){console.warn(`상품 ${g} 조회 실패: ${cur.error}`);for(const r of group)r.out=[stored.old?.name||'',`❓ 확인 실패 (${cur.error})`,'','','','',stamp];continue;}
 const old=stored.old;
@@ -698,28 +699,39 @@ if(messages.length){const message=messages.join(' · ');const item=line(message)
 if(hasIssue&&remindOpen&&(!merged.lastAlert||now.getTime()-merged.lastAlert>=remindMs)&&!(changeOpen&&pending.some(p=>p.g===g))){const hours=Math.floor((now.getTime()-merged.issueSince)/3600000);const msg=[...new Set(issues)].join(' · ')+(hours>=1?` (${hours}시간째 미해결)`:'');reminders.push(line(msg));logs.push([stamp,'재알림',merged.name,msg,url(g)]);for(const r of group){if(!seasonLogs.has(r.season))seasonLogs.set(r.season,[]);seasonLogs.get(r.season).push([stamp,'재알림',g,merged.name,msg,url(g),'']);}merged.lastAlert=now.getTime();}
 nextState.set(g,{old:merged,cache:cur.cache});for(const r of group){const keys=Object.keys(merged.sizes).filter(k=>watched(r.w,k));const sold=merged.status==='GONE'?[]:keys.filter(k=>!merged.sizes[k]);const available=merged.status==='GONE'?[]:keys.filter(k=>merged.sizes[k]);const status=merged.status==='SALE'&&sold.length?'사이즈 품절':ko[merged.status]||merged.status;r.out=[merged.name,(merged.status==='SALE'&&!sold.length?'✅ ':'🚫 ')+status,sold.join(', '),available.join(', '),merged.issueSince?fmt(new Date(merged.issueSince)):'',merged.lastAlert?fmt(new Date(merged.lastAlert)):'',stamp];}}
 // 기존 좋아요/리스팅 추적 탭은 읽기 전용. 시즌별 탭에 결합한다.
-const likeRows=await read(`'좋아요_현황'!A2:J`);
+const likeRows=byName.has('좋아요_현황')?await read(`'좋아요_현황'!A2:J`):[];
 const likeMap=new Map(likeRows.filter(r=>r[0]).map(r=>[String(r[0]),r]));
-const missingRows=await read(`'품절_추적'!A2:F`);
+const missingRows=byName.has('품절_추적')?await read(`'품절_추적'!A2:F`):[];
 const missingMap=new Map(missingRows.filter(r=>r[0]).map(r=>[String(r[0]),r]));
+// 26FW 통합 현황: 기존 좋아요_현황/품절_추적 데이터를 먼저 합치고, 신규 등록 상품은 끝 행에 추가.
+// 기존 26FW 행을 절대 삭제하거나 순서를 재배열하지 않는다. 상품번호 중복은 최초 행만 갱신한다.
 for(const season of allSeasons){
   const title=season;
   const previous=await read(`'${title}'!A2:R`);
-  const previousIndex=new Map(previous.map((r,i)=>[String(r[0]||''),i]));
+  const previousIndex=new Map();
+  previous.forEach((r,i)=>{const g=String(r[0]||'').trim();if(g&&!previousIndex.has(g))previousIndex.set(g,i);});
   const updates=[];
-  for(const r of productRows.filter(x=>x.season===season&&x.goodsNo)){
-    const cur=nextState.get(r.goodsNo)?.old||fetched.get(r.goodsNo);
-    const isActive=seasonMap.get(season)===true&&r.enabled;
-    const keys=cur?Object.keys(cur.sizes||{}).filter(k=>watched(r.w,k)):[];
+  const registered=new Map(productRows.filter(r=>r.season==='26FW'&&r.goodsNo).map(r=>[r.goodsNo,r]));
+  const codes=[...new Set([...previousIndex.keys(),...likeMap.keys(),...missingMap.keys(),...registered.keys()])].filter(g=>/^\d{5,}$/.test(g));
+  for(const goodsNo of codes){
+    const r=registered.get(goodsNo);
+    const cur=nextState.get(goodsNo)?.old||fetched.get(goodsNo);
+    const isActive=!!r&&seasonMap.get('26FW')===true&&r.enabled;
+    const keys=cur&&r?Object.keys(cur.sizes||{}).filter(k=>watched(r.w,k)):[];
     const sold=cur&&cur.status!=='GONE'?keys.filter(k=>!cur.sizes[k]):[];
     const available=cur&&cur.status!=='GONE'?keys.filter(k=>cur.sizes[k]):[];
-    const status=!seasonMap.get(season)?'⏸ 시즌 OFF':!r.enabled?'⏸ 감시 OFF':!cur||cur.error?'대기 / 조회 실패':cur.status==='SALE'&&sold.length?'사이즈 품절':ko[cur.status]||cur.status;
-    const l=likeMap.get(r.goodsNo)||[],m=missingMap.get(r.goodsNo)||[];
-    const v=[r.goodsNo,cur?.name||r.enteredName,isActive?'ON':'OFF',status,sold.join(', '),available.join(', '),cur?.issueSince?fmt(new Date(cur.issueSince)):'',cur?.lastAlert?fmt(new Date(cur.lastAlert)):'',isActive?stamp:'',l[4]||'',l[5]||'',l[6]||'',l[8]||'',l[9]||'',m.length?'이탈':'',m[4]||'',m[2]||'',m[5]||''];
-    if(previousIndex.has(r.goodsNo))updates.push({row:previousIndex.get(r.goodsNo)+2,v});
-    else {const row=previous.length+2;previousIndex.set(r.goodsNo,previous.length);previous.push(v);updates.push({row,v});}
+    const l=likeMap.get(goodsNo)||[],m=missingMap.get(goodsNo)||[];
+    const prior=previousIndex.has(goodsNo)?previous[previousIndex.get(goodsNo)]:[];
+    const status=!r?'미등록 (기존 데이터)':!seasonMap.get('26FW')?'⏸ 시즌 OFF':!r.enabled?'⏸ 감시 OFF':!cur||cur.error?'대기 / 조회 실패':cur.status==='SALE'&&sold.length?'사이즈 품절':ko[cur.status]||cur.status;
+    const v=[goodsNo,cur?.name||r?.enteredName||l[1]||m[1]||prior[1]||'',isActive?'ON':'OFF',status,sold.join(', ')||prior[4]||'',available.join(', ')||prior[5]||'',cur?.issueSince?fmt(new Date(cur.issueSince)):prior[6]||'',cur?.lastAlert?fmt(new Date(cur.lastAlert)):prior[7]||'',isActive?stamp:prior[8]||'',l[4]??prior[9]??'',l[5]??prior[10]??'',l[6]??prior[11]??'',l[8]??prior[12]??'',l[9]??prior[13]??'',m.length?'이탈':(prior[14]||''),m[4]||prior[15]||'',m[2]||prior[16]||'',m[5]??prior[17]??''];
+    if(previousIndex.has(goodsNo))updates.push({row:previousIndex.get(goodsNo)+2,v});
+    else {const row=previous.length+2;previousIndex.set(goodsNo,previous.length);previous.push(v);updates.push({row,v});}
   }
-  for(const u of updates)await put(`'${title}'!A${u.row}`,[u.v]);
+  for(let i=0;i<updates.length;i+=100){
+    const data=updates.slice(i,i+100).map(u=>({range:`'${title}'!A${u.row}:R${u.row}`,values:[u.v]}));
+    await sheets.spreadsheets.values.batchUpdate({spreadsheetId:ID,requestBody:{valueInputOption:'RAW',data}});
+  }
+  console.log(`26FW 통합 현황: 기존 행 보존, ${updates.length}개 상품 연결/갱신`);
 }
 // Keep prior rows for excluded products, remove rows for deleted products only.
 const all=Array.from(nextState.entries()).map(([g,v])=>[g,JSON.stringify(v.old||null),JSON.stringify(v.cache||null),stamp]);await sheets.spreadsheets.values.clear({spreadsheetId:ID,range:`'${NAMES.state}'!A2:D`});if(all.length)await put(`'${NAMES.state}'!A2`,all);
@@ -729,7 +741,7 @@ await send(`🔔 *무신사 상품 변동* (${alerts.length}건)`,alerts);await 
 // 대기 알림은 별도 탭에 저장 (기존 품절_설정 탭은 읽거나 수정하지 않는다).
 await sheets.spreadsheets.values.clear({spreadsheetId:ID,range:`'${NAMES.pending}'!A2:C`});
 if(pending.length)await put(`'${NAMES.pending}'!A2`,pending.slice(-100).map(p=>[stamp,p.g,p.line]));
-for(const [season,entries] of seasonLogs){if(entries.length)await sheets.spreadsheets.values.append({spreadsheetId:ID,range:`'${season}_이력'!A:F`,valueInputOption:'RAW',insertDataOption:'INSERT_ROWS',requestBody:{values:entries.map(x=>x.slice(0,6))}});}
+for(const [season,entries] of seasonLogs){if(entries.length&&season==='26FW')await sheets.spreadsheets.values.append({spreadsheetId:ID,range:`'${NAMES.history}'!A:G`,valueInputOption:'RAW',insertDataOption:'INSERT_ROWS',requestBody:{values:entries.map(x=>[x[0],season,x[1],x[2],x[3],x[4],x[5]])}});}
 if(logs.length)await sheets.spreadsheets.values.append({spreadsheetId:ID,range:`'${NAMES.log}'!A:E`,valueInputOption:'RAW',insertDataOption:'INSERT_ROWS',requestBody:{values:logs}});
 console.log(`품절 모니터링 완료: ${grouped.size}개 상품, 변동 ${alerts.length}건, 재알림 ${reminders.length}건, 대기 ${pending.length}건`);
 }
