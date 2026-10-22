@@ -1,0 +1,28 @@
+name: 무신사 품절 모니터링 테스트 (수동 전용)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-stock:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: monitor-test
+    steps:
+      - name: 코드 가져오기
+        uses: actions/checkout@v4
+      - name: Node.js 설치
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: 패키지 설치
+        run: npm install
+      - name: 테스트 시트에서 품절 모니터링만 실행 (Slack 미전송)
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          VIEWER_SPREADSHEET_ID: ${{ vars.TEST_SPREADSHEET_ID }}
+          MONITOR_MODE: stock
+          SLACK_WEBHOOK_URL: ''
+          SLACK_WEBHOOK_STOCK: ''
+        run: node collect_viewers.js
