@@ -553,7 +553,90 @@ async function main() {
   await sendSlackAlert({ hot, spikes, soldOut, needCheck, returned, stamp });
 }
 
-main().catch((err) => {
-  console.error('에러 발생:', err);
-  process.exit(1);
-});
+// 실행 진입점은 파일 맨 아래의 통합 실행 관리자가 담당합니다.
+
+
+// =============== 신규: 무신사 품절 모니터링 ===============
+const runStockMonitor = (function () {
+'use strict';
+// Independent stock monitor. Uses the SAME spreadsheet as collect_viewers.js.
+const {google} = require('googleapis');
+const ID = process.env.VIEWER_SPREADSHEET_ID;
+const API = 'https://goods-detail.musinsa.com/api2/goods/';
+const HEAD = {'Accept':'application/json','Referer':'https://www.musinsa.com/','User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0 Safari/537.36'};
+const NAMES = {products:'품절_상품목록',settings:'품절_설정',log:'품절_알림기록',state:'품절_상태저장'};
+const PRODUCT_HEADER=['상품 URL','감시 사이즈 (비우면 전체)','담당자','상품 감시 제외','제외 사이즈','상품명','상태','품절 사이즈','판매중 사이즈','문제 발생 시각','마지막 알림','마지막 확인'];
+const DEFAULTS=[['재알림 간격(시간)',3,'문제 지속 시 재알림 간격'],['재알림 시작 시각',9,'한국시간 0~23'],['재알림 종료 시각',20,'한국시간 0~24'],['변동 알림 시작 시각',9,'시간 외 변동은 보관'],['변동 알림 종료 시각',20,'한국시간 0~24'],['사이즈 품절도 재알림','예','예/아니오'],['재입고·판매재개 알림','예','예/아니오']];
+const STATE_HEADER=['상품번호','이전 상태 JSON','옵션 캐시 JSON','업데이트 시각'];
+const LOG_HEADER=['시각','종류','상품명','내용','URL'];
+const TZ='Asia/Seoul';
+const fmt=d=>new Intl.DateTimeFormat('sv-SE',{timeZone:TZ,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).format(d).replace(' ',' ');
+const hour=d=>Number(new Intl.DateTimeFormat('en-US',{timeZone:TZ,hour:'numeric',hourCycle:'h23'}).format(d));
+const inHours=(h,a,b)=>a===b?false:(a<b?h>=a&&h<b:h>=a||h<b);
+const truth=v=>/^(예|y|yes|o|true|on|1)$/i.test(String(v||'').trim());
+const split=v=>String(v||'').split(',').map(x=>x.trim().toLowerCase()).filter(Boolean);
+const watched=(w,k)=>{const tokens=[k.toLowerCase().trim(),...k.toLowerCase().split('/').map(s=>s.trim())];return !tokens.some(t=>w.skip.includes(t))&&(!w.only.length||tokens.some(t=>w.only.includes(t)));};
+const url=g=>`https://www.musinsa.com/products/${g}`;
+const esc=s=>String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\|/g,'¦');
+const ko={SALE:'판매중',SOLDOUT:'전체 품절',STOP_SALE:'판매 중지',GONE:'상품 삭제됨'};
+const safeJSON=(v,def=null)=>{try{return JSON.parse(v);}catch{return def;}};
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+async function request(endpoint,body){for(let attempt=0;attempt<3;attempt++){try{const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),15000);let res;try{res=await fetch(endpoint,{method:body?'POST':'GET',headers:{...HEAD,...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined,signal:controller.signal});}finally{clearTimeout(timer);}if(res.status===404)return {gone:true};if([429,500,502,503,504].includes(res.status)&&attempt<2){await sleep(700*(attempt+1));continue;}if(!res.ok)return {error:`HTTP ${res.status}`};const json=await res.json();return {data:json.data};}catch(e){if(attempt===2)return {error:e.message};await sleep(700*(attempt+1));}}}
+async function getProduct(g,cache){const detail=await request(API+g);if(detail.error)return {error:detail.error};if(detail.gone||!detail.data)return {name:g,status:'GONE',sizes:{},cache};const d=detail.data;let status=d.goodsSaleType||'UNKNOWN';if(status==='SALE'&&d.isOutOfStock)status='SOLDOUT';const saleType=d.goodsSaleType||'SALE';let options=cache&&cache.saleType===saleType&&Date.now()-cache.t<3600000?cache.items:null;
+if(!options){const r=await request(`${API}${g}/options?goodsSaleType=${encodeURIComponent(saleType)}`);if(r.error||r.gone)return {error:r.error||'옵션 조회 실패'};options=((r.data||{}).optionItems||[]).filter(x=>!x.isDeleted).map(x=>({no:x.no,label:(x.optionValues||[]).map(v=>v.name).join(' / ')||x.managedCode||String(x.no),values:x.optionValueNos||[],active:x.activated!==false}));cache={saleType,t:Date.now(),items:options};}
+const sizes={};if(options.length){const inv=await request(`${API}${g}/options/v2/prioritized-inventories`,{optionValueNos:options.flatMap(x=>x.values)});if(inv.error||inv.gone)return {error:inv.error||'재고 조회 실패'};const stock=new Map((inv.data||[]).map(x=>[String(x.productVariantId),x.outOfStock===false]));for(const o of options)sizes[o.label]=o.active&&stock.get(String(o.no))===true;}
+return {name:d.goodsNm||g,status,sizes,cache};}
+function issue(st,w,sizeRemind){if(st.status!=='SALE')return '🚫 '+(ko[st.status]||st.status);if(!sizeRemind)return null;const missing=Object.keys(st.sizes).filter(k=>watched(w,k)&&!st.sizes[k]);return missing.length?'❌ '+missing.join(', ')+' 품절':null;}
+function diff(old,cur,w,restock){const out=[];if(old.status!==cur.status){if(cur.status==='SALE'){if(restock)out.push('✅ 판매 재개');}else out.push('🚫 '+(ko[cur.status]||cur.status));}if(cur.status==='GONE')return out;for(const [k,v] of Object.entries(cur.sizes)){if(!watched(w,k))continue;if(old.sizes?.[k]===true&&!v)out.push(`❌ ${k} 품절`);else if(old.sizes?.[k]===false&&v&&restock)out.push(`✅ ${k} 재입고`);}for(const [k,v] of Object.entries(old.sizes||{})){if(!(k in cur.sizes)&&v&&old.status!=='GONE'&&watched(w,k))out.push(`❌ ${k} 옵션 삭제`);}return out;}
+async function main(){if(!ID||!process.env.GOOGLE_SERVICE_ACCOUNT_JSON)throw Error('GOOGLE_SERVICE_ACCOUNT_JSON / VIEWER_SPREADSHEET_ID 필수');const credentials=JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);const auth=new google.auth.GoogleAuth({credentials,scopes:['https://www.googleapis.com/auth/spreadsheets']});const sheets=google.sheets({version:'v4',auth});const meta=await sheets.spreadsheets.get({spreadsheetId:ID});const byName=new Map((meta.data.sheets||[]).map(x=>[x.properties.title,x.properties.sheetId]));const missing=Object.values(NAMES).filter(n=>!byName.has(n));if(missing.length){const r=await sheets.spreadsheets.batchUpdate({spreadsheetId:ID,requestBody:{requests:missing.map(title=>({addSheet:{properties:{title}}}))}});for(const s of r.data.replies)byName.set(s.addSheet.properties.title,s.addSheet.properties.sheetId);}
+const read=async(range)=>((await sheets.spreadsheets.values.get({spreadsheetId:ID,range})).data.values||[]);
+const put=async(range,values)=>sheets.spreadsheets.values.update({spreadsheetId:ID,range,valueInputOption:'RAW',requestBody:{values}});
+const ensureHeader=async(name,header)=>{const rows=await read(`'${name}'!A1:${String.fromCharCode(64+header.length)}1`);if(!rows.length||!rows[0].some(x=>String(x).trim()))await put(`'${name}'!A1`,[header]);else if(header.some((h,i)=>rows[0][i]!==h))throw Error(`${name} 헤더가 예상 구조와 다릅니다. 기존 데이터를 보호하기 위해 중단합니다.`);};
+await ensureHeader(NAMES.products,PRODUCT_HEADER);await ensureHeader(NAMES.settings,['항목','값','설명']);await ensureHeader(NAMES.log,LOG_HEADER);await ensureHeader(NAMES.state,STATE_HEADER);
+let settingRows=await read(`'${NAMES.settings}'!A2:C`);const settings=new Map(settingRows.map(r=>[r[0],r[1]]));const add=DEFAULTS.filter(x=>!settings.has(x[0]));if(add.length){await put(`'${NAMES.settings}'!A${settingRows.length+2}`,add);for(const x of add)settings.set(x[0],x[1]);}
+const num=(name,fallback)=>{const n=Number(settings.get(name));return Number.isFinite(n)?n:fallback;};const sizeRemind=truth(settings.get('사이즈 품절도 재알림'));const restock=truth(settings.get('재입고·판매재개 알림'));const now=new Date(),stamp=fmt(now),h=hour(now);const changeOpen=inHours(h,num('변동 알림 시작 시각',9),num('변동 알림 종료 시각',20));const remindOpen=inHours(h,num('재알림 시작 시각',9),num('재알림 종료 시각',20));const remindMs=Math.max(.5,num('재알림 간격(시간)',3))*3600000;
+const rows=await read(`'${NAMES.products}'!A2:L`);const stateRows=await read(`'${NAMES.state}'!A2:D`);const state=new Map(stateRows.filter(r=>r[0]).map(r=>[String(r[0]),{old:safeJSON(r[1]),cache:safeJSON(r[2])}]));const productRows=rows.map((r,i)=>({index:i,url:String(r[0]||'').trim(),goodsNo:(String(r[0]||'').match(/\d{5,}/)||[])[0],w:{only:split(r[1]),skip:split(r[4])},owner:String(r[2]||'').trim(),excluded:r[3]===true||truth(r[3])||String(r[3]||'').trim()==='TRUE',out:Array(7).fill('')}));const grouped=new Map();for(const r of productRows){if(r.url&&r.goodsNo&&!r.excluded){if(!grouped.has(r.goodsNo))grouped.set(r.goodsNo,[]);grouped.get(r.goodsNo).push(r);}}
+const alerts=[],reminders=[],logs=[];let pending=safeJSON(settings.get('__pending'),[])||[];if(!Array.isArray(pending))pending=[];const nextState=new Map(state);
+for(const [g,group] of grouped){const stored=state.get(g)||{};const cur=await getProduct(g,stored.cache);if(cur.error){console.warn(`상품 ${g} 조회 실패: ${cur.error}`);for(const r of group)r.out=[stored.old?.name||'',`❓ 확인 실패 (${cur.error})`,'','','','',stamp];continue;}
+const old=stored.old;const merged={name:cur.status==='GONE'&&old?old.name:cur.name,status:cur.status,sizes:cur.status==='GONE'&&old?old.sizes:cur.sizes,issueSince:old?.issueSince||null,lastAlert:old?.lastAlert||null};const watch={only:[],skip:[]}; // All monitored rows contribute; each row retains its own filtering.
+const issues=group.map(r=>issue(merged,r.w,sizeRemind)).filter(Boolean);const hasIssue=issues.length>0;if(!hasIssue){merged.issueSince=null;merged.lastAlert=null;}else if(!merged.issueSince)merged.issueSince=now.getTime();
+const messages=old?[...new Set(group.flatMap(r=>diff(old,merged,r.w,restock)))]:[];const who=[...new Set(group.flatMap(r=>r.owner.split(/[,\n]+/).map(x=>x.trim()).filter(Boolean)))].join(', ');const line=(message)=>`• <${url(g)}|${esc(merged.name)}> — ${message}${who?' ('+esc(who)+')':''}`;
+if(messages.length){const message=messages.join(' · ');const item=line(message);if(changeOpen){alerts.push(item);if(hasIssue)merged.lastAlert=now.getTime();}else{pending.push({g,line:`• [${new Intl.DateTimeFormat('en-GB',{timeZone:TZ,hour:'2-digit',minute:'2-digit'}).format(now)}] ${item.slice(2)}`});}logs.push([stamp,changeOpen?'변동':'변동(시간 외)',merged.name,message,url(g)]);}
+if(hasIssue&&remindOpen&&(!merged.lastAlert||now.getTime()-merged.lastAlert>=remindMs)&&!(changeOpen&&pending.some(p=>p.g===g))){const hours=Math.floor((now.getTime()-merged.issueSince)/3600000);const msg=[...new Set(issues)].join(' · ')+(hours>=1?` (${hours}시간째 미해결)`:'');reminders.push(line(msg));logs.push([stamp,'재알림',merged.name,msg,url(g)]);merged.lastAlert=now.getTime();}
+nextState.set(g,{old:merged,cache:cur.cache});for(const r of group){const keys=Object.keys(merged.sizes).filter(k=>watched(r.w,k));const sold=merged.status==='GONE'?[]:keys.filter(k=>!merged.sizes[k]);const available=merged.status==='GONE'?[]:keys.filter(k=>merged.sizes[k]);const status=merged.status==='SALE'&&sold.length?'사이즈 품절':ko[merged.status]||merged.status;r.out=[merged.name,(merged.status==='SALE'&&!sold.length?'✅ ':'🚫 ')+status,sold.join(', '),available.join(', '),merged.issueSince?fmt(new Date(merged.issueSince)):'',merged.lastAlert?fmt(new Date(merged.lastAlert)):'',stamp];}}
+for(const r of productRows){if(!r.url)continue;if(r.excluded)r.out=[r.out[0]||rows[r.index]?.[5]||'','⏸ 감시 제외','','','','',''];else if(!r.goodsNo)r.out=['','⚠ URL 오류','','','','',stamp];}
+// Never clear user-managed A:E. Preserve state of excluded products so re-enabling does not fabricate changes.
+if(productRows.length)await put(`'${NAMES.products}'!F2`,productRows.map(r=>r.out));
+// Keep prior rows for excluded products, remove rows for deleted products only.
+const all=Array.from(nextState.entries()).filter(([g])=>productRows.some(r=>r.goodsNo===g)).map(([g,v])=>[g,JSON.stringify(v.old||null),JSON.stringify(v.cache||null),stamp]);await sheets.spreadsheets.values.clear({spreadsheetId:ID,range:`'${NAMES.state}'!A2:D`});if(all.length)await put(`'${NAMES.state}'!A2`,all);
+const webhook=process.env.SLACK_WEBHOOK_STOCK||process.env.SLACK_WEBHOOK_URL||'';async function send(title,lines){if(!lines.length)return true;if(!webhook){console.warn('Slack Webhook 없음: 알림 미발송');return false;}for(let i=0;i<lines.length;i+=30){const res=await fetch(webhook,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:(i===0?title+'\n':'')+lines.slice(i,i+30).join('\n'),unfurl_links:false})});if(!res.ok){console.error(`Slack 오류 HTTP ${res.status}`);return false;}}return true;}
+let delivered=[];if(changeOpen&&pending.length){const held=pending.slice(0,30).map(x=>x.line);if(pending.length>30)held.push(`…외 ${pending.length-30}건`);if(await send(`🌙 *알림 시간 외 변동* (${pending.length}건)`,held)){delivered=pending;pending=[];}}
+await send(`🔔 *무신사 상품 변동* (${alerts.length}건)`,alerts);await send(`⏰ *아직 해결 안 된 상품* (${reminders.length}건)`,reminders);
+// pending is persisted in settings as a reserved internal key (rather than GitHub ephemeral disk).
+const pRow=settingRows.findIndex(r=>r[0]==='__pending');if(pRow>=0)await put(`'${NAMES.settings}'!A${pRow+2}`,[['__pending',JSON.stringify(pending.slice(-30)),'시스템 관리용: 수정하지 마세요']]);else await put(`'${NAMES.settings}'!A${settingRows.length+add.length+2}`,[['__pending',JSON.stringify(pending.slice(-30)),'시스템 관리용: 수정하지 마세요']]);
+if(logs.length){const existing=await read(`'${NAMES.log}'!A2:E`);await sheets.spreadsheets.values.clear({spreadsheetId:ID,range:`'${NAMES.log}'!A2:E`});await put(`'${NAMES.log}'!A2`,[...logs.reverse(),...existing].slice(0,2999));}
+console.log(`품절 모니터링 완료: ${grouped.size}개 상품, 변동 ${alerts.length}건, 재알림 ${reminders.length}건, 대기 ${pending.length}건`);
+}
+
+
+return main;
+})();
+
+// =============== 단일 파일 실행 관리자 ===============
+// 예약 실행: 매 10분 품절, UTC 분이 00/30이면 기존 시청자도 실행
+// 수동 실행: mode=both/viewer/stock (기본 both)
+async function runIntegrated() {
+  const mode = (process.env.MONITOR_MODE || 'auto').toLowerCase();
+  const minute = new Date().getUTCMinutes();
+  const doViewer = mode === 'both' || mode === 'viewer' || (mode === 'auto' && minute % 30 < 10);
+  const doStock = mode === 'both' || mode === 'stock' || mode === 'auto';
+  const errors = [];
+  if (doViewer) {
+    try { await main(); } catch (e) { console.error('[시청자 모니터링 실패]', e); errors.push(e); }
+  }
+  if (doStock) {
+    try { await runStockMonitor(); } catch (e) { console.error('[품절 모니터링 실패]', e); errors.push(e); }
+  }
+  if (errors.length) process.exitCode = 1;
+}
+runIntegrated().catch(e => { console.error(e); process.exitCode = 1; });
