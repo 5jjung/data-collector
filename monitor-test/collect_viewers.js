@@ -793,6 +793,50 @@ for(const season of allSeasons){
   }
   console.log(`26FW 통합 현황: 기존 행 보존, ${updates.length}개 상품 연결/갱신`);
 }
+// 시트1의 누적 관측 기록을 26FW의 상품별 통합 요약(S:Z)에 연결한다.
+// 시트1 원본 및 26FW A:R은 변경하지 않는다. 같은 상품은 가장 최근 기록을 대표값으로 사용한다.
+// 시트1의 모든 시점별 기록은 원본 탭에 계속 보존된다.
+if (byName.has('시트1')) {
+  const historicalHeaders = ['시트1 최근 기록일', '시트1 최근 기록시간', '시트1 최근 보는 사람 수', '시트1 최근 좋아요', '시트1 최근 좋아요 증감', '시트1 최근 오늘 증가분', '시트1 누적 기록 횟수', '시트1 최대 보는 사람 수'];
+  const existingHistoricalHeader = (await read("'26FW'!S1:Z1"))[0] || [];
+  if (historicalHeaders.some((h, i) => existingHistoricalHeader[i] && existingHistoricalHeader[i] !== h)) {
+    throw Error('26FW S:Z에 기존 데이터 헤더가 있습니다. 데이터를 보호하기 위해 시트1 통합을 중단합니다.');
+  }
+  await put("'26FW'!S1:Z1", [historicalHeaders]);
+  const observations = await read("'시트1'!A2:H");
+  const summary = new Map();
+  for (const obs of observations) {
+    const goodsNo = String(obs[0] || '').trim();
+    if (!/^\d{5,}$/.test(goodsNo)) continue;
+    const date = String(obs[2] || '').trim();
+    const time = String(obs[3] || '').trim();
+    const stampKey = `${date} ${time}`;
+    const viewers = Number(String(obs[4] ?? '').replace(/,/g, ''));
+    let item = summary.get(goodsNo);
+    if (!item) {
+      item = {count:0, maxViewers:null, lastKey:'', last:null};
+      summary.set(goodsNo,item);
+    }
+    item.count++;
+    if (String(obs[4] ?? '').trim() !== '' && Number.isFinite(viewers)) item.maxViewers = item.maxViewers === null ? viewers : Math.max(item.maxViewers, viewers);
+    if (!item.last || stampKey >= item.lastKey) {item.lastKey=stampKey; item.last=obs;}
+  }
+  const seasonRowsForHistory = await read("'26FW'!A2:A");
+  const historicalUpdates = [];
+  seasonRowsForHistory.forEach((r,i) => {
+    const goodsNo=String(r[0]||'').trim();
+    const item=summary.get(goodsNo);
+    if (!item) return; // 기존 26FW의 수기 데이터는 변경하지 않는다.
+    const last=item.last;
+    historicalUpdates.push({range:`'26FW'!S${i+2}:Z${i+2}`,values:[[last[2]??'',last[3]??'',last[4]??'',last[5]??'',last[6]??'',last[7]??'',item.count,item.maxViewers??'']]});
+  });
+  for (let i=0;i<historicalUpdates.length;i+=100) {
+    await sheets.spreadsheets.values.batchUpdate({spreadsheetId:ID,requestBody:{valueInputOption:'RAW',data:historicalUpdates.slice(i,i+100)}});
+  }
+  console.log(`시트1 기록 통합: ${observations.length}행 읽음, ${historicalUpdates.length}개 26FW 상품에 연결 (원본 보존)`);
+} else {
+  console.warn('시트1 탭이 없어 과거 관측 기록 연결을 건너뜁니다.');
+}
 // Keep prior rows for excluded products, remove rows for deleted products only.
 // 상태 저장은 Slack 긴급 알림 전송 결과를 반영한 후 수행한다.
 const webhook=process.env.SLACK_WEBHOOK_STOCK||process.env.SLACK_WEBHOOK_URL||'';async function send(title,lines){if(!lines.length)return true;if(!webhook){console.warn('Slack Webhook 없음: 알림 미발송');return false;}for(let i=0;i<lines.length;i+=30){const res=await fetch(webhook,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:(i===0?title+'\n':'')+lines.slice(i,i+30).join('\n'),unfurl_links:false})});if(!res.ok){console.error(`Slack 오류 HTTP ${res.status}`);return false;}}return true;}
