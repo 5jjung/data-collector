@@ -6,6 +6,7 @@ on:
 jobs:
   test-stock:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     defaults:
       run:
         working-directory: monitor-test
@@ -18,11 +19,11 @@ jobs:
           node-version: '20'
       - name: 패키지 설치
         run: npm install
-      - name: 테스트 시트에서 품절 모니터링만 실행 (Slack 미전송)
+      - name: 테스트 시트에서 품절 + 좋아요 통합 테스트 (Slack 미전송)
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           VIEWER_SPREADSHEET_ID: ${{ vars.TEST_SPREADSHEET_ID }}
-          MONITOR_MODE: stock
+          MONITOR_MODE: both
           SLACK_WEBHOOK_URL: ''
           SLACK_WEBHOOK_STOCK: ''
         run: node collect_viewers.js
