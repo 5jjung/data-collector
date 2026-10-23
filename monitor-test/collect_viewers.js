@@ -686,21 +686,22 @@ const allSeasons=['26FW']; // 다른 시즌 탭을 새로 만들지 않음
 const seasonTitles=['26FW'];
 const toCreate=seasonTitles.filter(x=>!byName.has(x));
 if(toCreate.length){const added=await sheets.spreadsheets.batchUpdate({spreadsheetId:ID,requestBody:{requests:toCreate.map(title=>({addSheet:{properties:{title}}}))}});for(const r of added.data.replies)byName.set(r.addSheet.properties.title,r.addSheet.properties.sheetId);}
-// 26FW의 기존 O:R 헤더는 사용자 시트에 따라 다를 수 있으므로 절대 변경하지 않는다.
-// 화면에서 확인된 A:N 핵심 헤더만 검증하고, S열은 비어 있을 때만 새 헤더를 추가한다.
+// 26FW: 화면에 보이는 제목은 동일해도 공백/줄바꿈/제로폭 문자가 다를 수 있다.
+// 기존 A:N의 열 위치는 유지하며, O:R은 변경하지 않는다.
 for(const season of allSeasons){
   const existingHead=(await read(`'${season}'!A1:S1`))[0]||[];
+  const normalizeHeader=s=>String(s??'').normalize('NFKC').replace(/[\\s\\u200B-\\u200D\\uFEFF]/g,'').trim();
   const required=BASE_SEASON_HEADER.slice(0,14);
-  if(!existingHead.some(x=>String(x||'').trim())){
+  if(!existingHead.some(x=>normalizeHeader(x))){
     await put(`'${season}'!A1`,[BASE_SEASON_HEADER]);
   }else{
-    const mismatch=required.findIndex((h,i)=>String(existingHead[i]||'').trim()!==h);
-    if(mismatch>=0)throw Error(`${season} 핵심 헤더 불일치 (${mismatch+1}열): 실제=${JSON.stringify(existingHead[mismatch])}, 예상=${JSON.stringify(required[mismatch])}. 데이터 보호를 위해 중단`);
-    if(existingHead[18] && String(existingHead[18]).trim()!=='좋아요 확인 시각'){
-      throw Error(`${season} S열에 기존 제목이 있습니다: ${existingHead[18]}. 덮어쓰지 않고 중단`);
+    const mismatch=required.findIndex((h,i)=>normalizeHeader(existingHead[i])!==normalizeHeader(h));
+    if(mismatch>=0)throw Error(`${season} ${mismatch+1}열 헤더 불일치: 실제=${JSON.stringify(existingHead[mismatch])}, 예상=${JSON.stringify(required[mismatch])}. 해당 열은 수정하지 않았습니다.`);
+    if(existingHead[18] && normalizeHeader(existingHead[18])!==normalizeHeader('좋아요 확인 시각')){
+      throw Error(`${season} S열에 다른 제목이 있어 보존합니다: ${existingHead[18]}`);
     }
-    if(!existingHead[18]) await put(`'${season}'!S1`,[['좋아요 확인 시각']]);
-    console.log(`[진단] ${season} A:N 헤더 확인, 기존 O:R 유지, S열 확인 완료`);
+    if(!existingHead[18])await put(`'${season}'!S1`,[['좋아요 확인 시각']]);
+    console.log(`[진단] ${season} A:N 헤더 검증 완료, O:R 보존, S열 확인 완료`);
   }
 }
 await ensureHeader(NAMES.history,['시각','시즌','종류','상품번호','상품명','내용','상품 URL']);
@@ -778,11 +779,20 @@ if(urgentOpen&&hasIssue&&merged.lastUrgentDate!==kst.date){
   urgentGoods.push(g);
 }
 nextState.set(g,{old:merged,cache:cur.cache});for(const r of group){const keys=Object.keys(merged.sizes||{}).filter(k=>watched(r.w,k));const sold=merged.status==='GONE'?[]:keys.filter(k=>!merged.sizes[k]);const available=merged.status==='GONE'?[]:keys.filter(k=>merged.sizes[k]);const status=merged.status==='SALE'&&sold.length?'사이즈 품절':ko[merged.status]||merged.status;r.out=[merged.name,(merged.status==='SALE'&&!sold.length?'✅ ':'🚫 ')+status,sold.join(', '),available.join(', '),merged.issueSince?fmt(new Date(merged.issueSince)):'',merged.lastAlert?fmt(new Date(merged.lastAlert)):'',stamp];}}
+// 좋아요_현황 스냅샷에서 최근 수집값 읽기 (기록 탭은 절대 초기화하지 않음).
+const snapshotRows=await read("'좋아요_현황'!A2:J");
+const latestLikes=new Map();
+for(const line of snapshotRows){
+  const code=String(line[0]||'').trim();
+  if(/^\\d{5,}$/.test(code))latestLikes.set(code,line);
+}
+let latestUpdated=0;
+console.log(`[진단] 좋아요 최신 스냅샷 ${latestLikes.size}개 로드`);
 // 26FW는 품절 현황 전용. 좋아요 원본 기록은 별도 26FW좋아요_현황 탭에만 누적.
 // 기존 26FW 행을 절대 삭제하거나 순서를 재배열하지 않는다. 상품번호 중복은 최초 행만 갱신한다.
 for(const season of allSeasons){
   const title=season;
-  const previous=await read(`'${title}'!A2:R`);
+  const previous=await read(`'${title}'!A2:S`);
   const previousIndex=new Map();
   previous.forEach((r,i)=>{const g=String(r[0]||'').trim();if(g&&!previousIndex.has(g))previousIndex.set(g,i);});
   const updates=[];
