@@ -1,0 +1,38 @@
+name: 무신사 운영 시트 수동 검증 (26FW)
+
+# 안전장치: 수동 실행만 허용. 검증 후 평일 30분 스케줄을 별도로 활성화합니다.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: musinsa-operating-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: viewer-monitor
+    steps:
+      - name: 저장소 가져오기
+        uses: actions/checkout@v4
+      - name: Node.js 설치
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: 패키지 설치
+        run: npm install
+      - name: Playwright 설치
+        run: npx playwright install --with-deps chromium
+      - name: 운영 시트 수동 수집
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          VIEWER_SPREADSHEET_ID: ${{ vars.OPERATING_SPREADSHEET_ID }}
+          MONITOR_MODE: both
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_VIEWER }}
+          SLACK_WEBHOOK_STOCK: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: node collect_viewers.js
