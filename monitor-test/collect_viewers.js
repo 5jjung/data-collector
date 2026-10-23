@@ -16,7 +16,7 @@ const LISTING_URLS = [
   'https://www.musinsa.com/brand/codegraphy/products?tag=26WINTER&gf=A',
 ];
 const SPREADSHEET_ID = process.env.VIEWER_SPREADSHEET_ID;
-const SHEET_NAME = '시트1';              // 기록용 탭 (A~H열)
+const SHEET_NAME = '26FW좋아요_현황';   // 기존 시트1을 이름만 변경하여 누적 기록 유지
 const SNAPSHOT_SHEET = '좋아요_현황';     // 직전 좋아요 값 보관 탭 (없으면 자동 생성)
 const MISSING_SHEET = '품절_추적';        // 리스팅에서 사라진 상품 보관 탭 (없으면 자동 생성)
 const VIEWER_THRESHOLD = 50;             // 보는인원 알림 기준
@@ -758,12 +758,7 @@ if(urgentOpen&&hasIssue&&merged.lastUrgentDate!==kst.date){
   urgentGoods.push(g);
 }
 nextState.set(g,{old:merged,cache:cur.cache});for(const r of group){const keys=Object.keys(merged.sizes||{}).filter(k=>watched(r.w,k));const sold=merged.status==='GONE'?[]:keys.filter(k=>!merged.sizes[k]);const available=merged.status==='GONE'?[]:keys.filter(k=>merged.sizes[k]);const status=merged.status==='SALE'&&sold.length?'사이즈 품절':ko[merged.status]||merged.status;r.out=[merged.name,(merged.status==='SALE'&&!sold.length?'✅ ':'🚫 ')+status,sold.join(', '),available.join(', '),merged.issueSince?fmt(new Date(merged.issueSince)):'',merged.lastAlert?fmt(new Date(merged.lastAlert)):'',stamp];}}
-// 기존 좋아요/리스팅 추적 탭은 읽기 전용. 시즌별 탭에 결합한다.
-const likeRows=byName.has('좋아요_현황')?await read(`'좋아요_현황'!A2:J`):[];
-const likeMap=new Map(likeRows.filter(r=>r[0]).map(r=>[String(r[0]),r]));
-const missingRows=byName.has('품절_추적')?await read(`'품절_추적'!A2:F`):[];
-const missingMap=new Map(missingRows.filter(r=>r[0]).map(r=>[String(r[0]),r]));
-// 26FW 통합 현황: 기존 좋아요_현황/품절_추적 데이터를 먼저 합치고, 신규 등록 상품은 끝 행에 추가.
+// 26FW는 품절 현황 전용. 좋아요 원본 기록은 별도 26FW좋아요_현황 탭에만 누적.
 // 기존 26FW 행을 절대 삭제하거나 순서를 재배열하지 않는다. 상품번호 중복은 최초 행만 갱신한다.
 for(const season of allSeasons){
   const title=season;
@@ -772,7 +767,7 @@ for(const season of allSeasons){
   previous.forEach((r,i)=>{const g=String(r[0]||'').trim();if(g&&!previousIndex.has(g))previousIndex.set(g,i);});
   const updates=[];
   const registered=new Map(productRows.filter(r=>r.season==='26FW'&&r.goodsNo).map(r=>[r.goodsNo,r]));
-  const codes=[...new Set([...previousIndex.keys(),...likeMap.keys(),...missingMap.keys(),...registered.keys()])].filter(g=>/^\d{5,}$/.test(g));
+  const codes=[...new Set([...previousIndex.keys(),...registered.keys()])].filter(g=>/^\d{5,}$/.test(g));
   for(const goodsNo of codes){
     const r=registered.get(goodsNo);
     const cur=nextState.get(goodsNo)?.old||fetched.get(goodsNo);
@@ -780,10 +775,9 @@ for(const season of allSeasons){
     const keys=cur&&r?Object.keys(cur.sizes||{}).filter(k=>watched(r.w,k)):[];
     const sold=cur&&cur.status!=='GONE'?keys.filter(k=>!cur.sizes[k]):[];
     const available=cur&&cur.status!=='GONE'?keys.filter(k=>cur.sizes[k]):[];
-    const l=likeMap.get(goodsNo)||[],m=missingMap.get(goodsNo)||[];
     const prior=previousIndex.has(goodsNo)?previous[previousIndex.get(goodsNo)]:[];
     const status=!r?'미등록 (기존 데이터)':!seasonMap.get('26FW')?'⏸ 시즌 OFF':!r.enabled?'⏸ 감시 OFF':!cur||cur.error?'대기 / 조회 실패':cur.status==='SALE'&&sold.length?'사이즈 품절':ko[cur.status]||cur.status;
-    const v=[goodsNo,cur?.name||r?.enteredName||l[1]||m[1]||prior[1]||'',isActive?'ON':'OFF',status,sold.join(', ')||prior[4]||'',available.join(', ')||prior[5]||'',cur?.issueSince?fmt(new Date(cur.issueSince)):prior[6]||'',cur?.lastAlert?fmt(new Date(cur.lastAlert)):prior[7]||'',isActive?stamp:prior[8]||'',l[4]??prior[9]??'',l[5]??prior[10]??'',l[6]??prior[11]??'',l[8]??prior[12]??'',l[9]??prior[13]??'',m.length?'이탈':(prior[14]||''),m[4]||prior[15]||'',m[2]||prior[16]||'',m[5]??prior[17]??''];
+    const v=[goodsNo,cur?.name||r?.enteredName||prior[1]||'',isActive?'ON':'OFF',status,sold.join(', ')||prior[4]||'',available.join(', ')||prior[5]||'',cur?.issueSince?fmt(new Date(cur.issueSince)):prior[6]||'',cur?.lastAlert?fmt(new Date(cur.lastAlert)):prior[7]||'',isActive?stamp:prior[8]||'',prior[9]??'',prior[10]??'',prior[11]??'',prior[12]??'',prior[13]??'',prior[14]??'',prior[15]??'',prior[16]??'',prior[17]??''];
     if(previousIndex.has(goodsNo))updates.push({row:previousIndex.get(goodsNo)+2,v});
     else {const row=previous.length+2;previousIndex.set(goodsNo,previous.length);previous.push(v);updates.push({row,v});}
   }
@@ -791,51 +785,7 @@ for(const season of allSeasons){
     const data=updates.slice(i,i+100).map(u=>({range:`'${title}'!A${u.row}:R${u.row}`,values:[u.v]}));
     await sheets.spreadsheets.values.batchUpdate({spreadsheetId:ID,requestBody:{valueInputOption:'RAW',data}});
   }
-  console.log(`26FW 통합 현황: 기존 행 보존, ${updates.length}개 상품 연결/갱신`);
-}
-// 시트1의 누적 관측 기록을 26FW의 상품별 통합 요약(S:Z)에 연결한다.
-// 시트1 원본 및 26FW A:R은 변경하지 않는다. 같은 상품은 가장 최근 기록을 대표값으로 사용한다.
-// 시트1의 모든 시점별 기록은 원본 탭에 계속 보존된다.
-if (byName.has('시트1')) {
-  const historicalHeaders = ['시트1 최근 기록일', '시트1 최근 기록시간', '시트1 최근 보는 사람 수', '시트1 최근 좋아요', '시트1 최근 좋아요 증감', '시트1 최근 오늘 증가분', '시트1 누적 기록 횟수', '시트1 최대 보는 사람 수'];
-  const existingHistoricalHeader = (await read("'26FW'!S1:Z1"))[0] || [];
-  if (historicalHeaders.some((h, i) => existingHistoricalHeader[i] && existingHistoricalHeader[i] !== h)) {
-    throw Error('26FW S:Z에 기존 데이터 헤더가 있습니다. 데이터를 보호하기 위해 시트1 통합을 중단합니다.');
-  }
-  await put("'26FW'!S1:Z1", [historicalHeaders]);
-  const observations = await read("'시트1'!A2:H");
-  const summary = new Map();
-  for (const obs of observations) {
-    const goodsNo = String(obs[0] || '').trim();
-    if (!/^\d{5,}$/.test(goodsNo)) continue;
-    const date = String(obs[2] || '').trim();
-    const time = String(obs[3] || '').trim();
-    const stampKey = `${date} ${time}`;
-    const viewers = Number(String(obs[4] ?? '').replace(/,/g, ''));
-    let item = summary.get(goodsNo);
-    if (!item) {
-      item = {count:0, maxViewers:null, lastKey:'', last:null};
-      summary.set(goodsNo,item);
-    }
-    item.count++;
-    if (String(obs[4] ?? '').trim() !== '' && Number.isFinite(viewers)) item.maxViewers = item.maxViewers === null ? viewers : Math.max(item.maxViewers, viewers);
-    if (!item.last || stampKey >= item.lastKey) {item.lastKey=stampKey; item.last=obs;}
-  }
-  const seasonRowsForHistory = await read("'26FW'!A2:A");
-  const historicalUpdates = [];
-  seasonRowsForHistory.forEach((r,i) => {
-    const goodsNo=String(r[0]||'').trim();
-    const item=summary.get(goodsNo);
-    if (!item) return; // 기존 26FW의 수기 데이터는 변경하지 않는다.
-    const last=item.last;
-    historicalUpdates.push({range:`'26FW'!S${i+2}:Z${i+2}`,values:[[last[2]??'',last[3]??'',last[4]??'',last[5]??'',last[6]??'',last[7]??'',item.count,item.maxViewers??'']]});
-  });
-  for (let i=0;i<historicalUpdates.length;i+=100) {
-    await sheets.spreadsheets.values.batchUpdate({spreadsheetId:ID,requestBody:{valueInputOption:'RAW',data:historicalUpdates.slice(i,i+100)}});
-  }
-  console.log(`시트1 기록 통합: ${observations.length}행 읽음, ${historicalUpdates.length}개 26FW 상품에 연결 (원본 보존)`);
-} else {
-  console.warn('시트1 탭이 없어 과거 관측 기록 연결을 건너뜁니다.');
+  console.log(`26FW 품절 현황: 기존 행 보존, ${updates.length}개 상품 연결/갱신`);
 }
 // Keep prior rows for excluded products, remove rows for deleted products only.
 // 상태 저장은 Slack 긴급 알림 전송 결과를 반영한 후 수행한다.
@@ -863,12 +813,35 @@ return main;
 // =============== 단일 파일 실행 관리자 ===============
 // 예약 실행: 30분마다 품절/시청자 체크. 알림 발송은 KST 평일 업무시간만
 // 수동 실행: mode=both/viewer/stock (기본 both)
+// 최초 1회: 기존 시트1 탭의 sheetId와 6,307행을 그대로 유지하면서 이름만 변경.
+// 이름이 둘 다 존재하면 자동 병합/삭제하지 않고 중단하여 원본 데이터를 보호한다.
+async function ensureViewerHistoryTab() {
+  if (!process.env.VIEWER_SPREADSHEET_ID || !process.env.GOOGLE_SERVICE_ACCOUNT_JSON) return;
+  const {google} = require('googleapis');
+  const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+  const auth = new google.auth.GoogleAuth({credentials,scopes:['https://www.googleapis.com/auth/spreadsheets']});
+  const sheets = google.sheets({version:'v4',auth});
+  const spreadsheetId = process.env.VIEWER_SPREADSHEET_ID;
+  const result = await sheets.spreadsheets.get({spreadsheetId,fields:'sheets(properties(sheetId,title))'});
+  const tabs = result.data.sheets.map(x=>x.properties);
+  const oldTab = tabs.find(x=>x.title==='시트1');
+  const newTab = tabs.find(x=>x.title==='26FW좋아요_현황');
+  if (oldTab && newTab) throw new Error('시트1과 26FW좋아요_현황 탭이 모두 있습니다. 기록 보호를 위해 자동 변경하지 않습니다.');
+  if (oldTab) {
+    await sheets.spreadsheets.batchUpdate({spreadsheetId,requestBody:{requests:[{updateSheetProperties:{properties:{sheetId:oldTab.sheetId,title:'26FW좋아요_현황'},fields:'title'}}]}});
+    console.log('기존 시트1 → 26FW좋아요_현황 이름 변경 완료 (기존 기록/행/서식 보존)');
+  } else if (!newTab) {
+    throw new Error('시트1 또는 26FW좋아요_현황 탭이 없습니다. 원본 기록 보호를 위해 중단합니다.');
+  }
+}
+
 async function runIntegrated() {
   const mode = (process.env.MONITOR_MODE || 'auto').toLowerCase();
   const minute = new Date().getUTCMinutes();
   const doViewer = mode === 'both' || mode === 'viewer' || (mode === 'auto' && minute % 30 < 10);
   const doStock = mode === 'both' || mode === 'stock' || (mode === 'auto' && minute % 30 < 10);
   const errors = [];
+  if (doViewer || doStock) await ensureViewerHistoryTab();
   if (doViewer) {
     try { await main(); } catch (e) { console.error('[시청자 모니터링 실패]', e); errors.push(e); }
   }
