@@ -1,0 +1,39 @@
+
+name: 무신사 좋아요 및 실시간 보는 사람 수 (24시간)
+
+on:
+  schedule:
+    # 매일 00분, 30분 실행 (UTC 및 KST 모두 30분 간격)
+    - cron: '0,30 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: musinsa-integrated-monitor
+  cancel-in-progress: false
+
+jobs:
+  viewer-monitor:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: viewer-monitor
+    steps:
+      - name: 저장소 코드 가져오기
+        uses: actions/checkout@v4
+      - name: Node.js 설치
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: 패키지 설치
+        run: npm install
+      - name: Playwright 브라우저 설치
+        run: npx playwright install --with-deps chromium
+      - name: 좋아요 및 실시간 보는 사람 수 수집
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          VIEWER_SPREADSHEET_ID: ${{ vars.OPERATING_SPREADSHEET_ID }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_VIEWER }}
+          MONITOR_MODE: viewer
+        run: node collect_viewers.js
