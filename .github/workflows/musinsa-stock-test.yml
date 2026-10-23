@@ -19,6 +19,8 @@ jobs:
           node-version: '20'
       - name: 패키지 설치
         run: npm install
+      - name: Playwright Chromium 설치
+        run: npx playwright install --with-deps chromium
       - name: 테스트 시트에서 품절 + 좋아요 통합 테스트 (Slack 미전송)
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
