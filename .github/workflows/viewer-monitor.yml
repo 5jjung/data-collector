@@ -2,7 +2,8 @@ name: 실시간 관심고객수 + 품절 통합 모니터링
 
 on:
   schedule:
-    - cron: '*/10 * * * *'
+  # 한국시간 평일 09:00~18:30, 30분 간격
+  - cron: '*/30 0-9 * * 1-5'
   workflow_dispatch:
     inputs:
       mode:
