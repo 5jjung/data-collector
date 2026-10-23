@@ -45,5 +45,5 @@ jobs:
           VIEWER_SPREADSHEET_ID: ${{ vars.OPERATING_SPREADSHEET_ID }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_VIEWER }}
           SLACK_WEBHOOK_STOCK: ${{ secrets.SLACK_WEBHOOK_STOCK }}
-          MONITOR_MODE: ${{ github.event.inputs.mode || 'auto' }}
+          MONITOR_MODE: ${{ github.event.inputs.mode || 'stock' }}
         run: node collect_viewers.js
