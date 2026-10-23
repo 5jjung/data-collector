@@ -587,7 +587,7 @@ const IMPORT_SEASON='26FW';
 const SEASON_HEADER=['시즌','감시 ON/OFF','설명'];
 const OWNER_HEADER=['담당자명','Slack 멤버 ID','사용 여부'];
 const SEASON_RE=/^\d{2}(SS|FW)$/;
-const BASE_SEASON_HEADER=['상품번호','상품명','감시 여부','판매 상태','품절 옵션','판매중 옵션','문제 발생 시각','마지막 알림','마지막 확인','현재 좋아요','직전 좋아요','좋아요 증감','오늘 좋아요 증가','최근 보는 사람 수','리스팅 이탈 여부','이탈 구분','이탈 날짜','마지막 좋아요','좋아요 확인 시각'];
+const BASE_SEASON_HEADER=['상품번호','상품명','감시 여부','판매 상태','품절 옵션','판매중 옵션','문제 발생 시각','마지막 알림','마지막 확인','현재 좋아요','직전 좋아요','좋아요 증감','오늘 좋아요 증가','최근 보는 사람 수','좋아요 마지막 확인 시각'];
 const SEASON_LOG_HEADER=['시각','종류','상품번호','상품명','내용','상품 URL'];
 const OPTION_START=5; // 상품등록 F열부터 실제 옵션명 헤더를 동적으로 추가 (E열 URL)
 const STATE_HEADER=['상품번호','이전 상태 JSON','옵션 캐시 JSON','업데이트 시각'];
@@ -686,22 +686,38 @@ const allSeasons=['26FW']; // 다른 시즌 탭을 새로 만들지 않음
 const seasonTitles=['26FW'];
 const toCreate=seasonTitles.filter(x=>!byName.has(x));
 if(toCreate.length){const added=await sheets.spreadsheets.batchUpdate({spreadsheetId:ID,requestBody:{requests:toCreate.map(title=>({addSheet:{properties:{title}}}))}});for(const r of added.data.replies)byName.set(r.addSheet.properties.title,r.addSheet.properties.sheetId);}
-// 26FW: 화면에 보이는 제목은 동일해도 공백/줄바꿈/제로폭 문자가 다를 수 있다.
-// 기존 A:N의 열 위치는 유지하며, O:R은 변경하지 않는다.
+// 26FW의 기존 O:AZ는 이전 테스트 컬럼. 첫 실행에 별도 탭에 백업하고 O열만 새 용도로 전환.
+// P:AZ는 검증 완료 전까지 삭제/초기화하지 않는다. A:N 헤더는 기존 구조와 호환되는지 확인한다.
+const columnName = n => {let out='';for(n++;n;n=Math.floor((n-1)/26))out=String.fromCharCode(65+(n-1)%26)+out;return out;};
+const normHeader=s=>String(s??'').normalize('NFKC').replace(/[\\s\\u200B-\\u200D\\uFEFF]/g,'').trim();
 for(const season of allSeasons){
-  const existingHead=(await read(`'${season}'!A1:S1`))[0]||[];
-  const normalizeHeader=s=>String(s??'').normalize('NFKC').replace(/[\\s\\u200B-\\u200D\\uFEFF]/g,'').trim();
-  const required=BASE_SEASON_HEADER.slice(0,14);
-  if(!existingHead.some(x=>normalizeHeader(x))){
+  const head=(await read(`'${season}'!A1:AZ1`))[0]||[];
+  const expected=BASE_SEASON_HEADER.slice(0,14);
+  if(!head.some(v=>normHeader(v))){
     await put(`'${season}'!A1`,[BASE_SEASON_HEADER]);
-  }else{
-    const mismatch=required.findIndex((h,i)=>normalizeHeader(existingHead[i])!==normalizeHeader(h));
-    if(mismatch>=0)throw Error(`${season} ${mismatch+1}열 헤더 불일치: 실제=${JSON.stringify(existingHead[mismatch])}, 예상=${JSON.stringify(required[mismatch])}. 해당 열은 수정하지 않았습니다.`);
-    if(existingHead[18] && normalizeHeader(existingHead[18])!==normalizeHeader('좋아요 확인 시각')){
-      throw Error(`${season} S열에 다른 제목이 있어 보존합니다: ${existingHead[18]}`);
+  } else {
+    const bad=expected.findIndex((h,i)=>normHeader(head[i])!==normHeader(h));
+    if(bad!==-1)throw Error(`${season} ${columnName(bad)}열 제목이 예상과 다릅니다: ${JSON.stringify(head[bad])}. 기존 데이터 보호를 위해 중단`);
+    if(normHeader(head[14])!==normHeader(BASE_SEASON_HEADER[14])){
+      const backupTitle=`${season}_구열백업`;
+      if(!byName.has(backupTitle)){
+        const oldRows=await read(`'${season}'!O1:AZ`);
+        const created=await sheets.spreadsheets.batchUpdate({spreadsheetId:ID,requestBody:{requests:[{addSheet:{properties:{title:backupTitle}}}]}});
+        byName.set(backupTitle,created.data.replies[0].addSheet.properties.sheetId);
+        const backupValues=[['원본 O열부터 AZ열까지 (기존 테스트 컬럼 백업)'],...oldRows];
+        for(let i=0;i<backupValues.length;i+=300){
+          await put(`'${backupTitle}'!A${i+1}`,backupValues.slice(i,i+300));
+        }
+        const check=await read(`'${backupTitle}'!A1:AL`);
+        if(check.length!==backupValues.length)throw Error('구열 백업 검증 실패. O열 변경 중단');
+        console.log(`[백업] ${backupTitle} 생성, 기존 O:AZ ${oldRows.length}행 보존`);
+      }else{
+        const existingBackup=await read(`'${backupTitle}'!A1:A2`);
+        if(!existingBackup.length)throw Error('구열백업 탭이 비어 있습니다. O열 변경 중단');
+      }
+      await put(`'${season}'!O1`,[[BASE_SEASON_HEADER[14]]]);
     }
-    if(!existingHead[18])await put(`'${season}'!S1`,[['좋아요 확인 시각']]);
-    console.log(`[진단] ${season} A:N 헤더 검증 완료, O:R 보존, S열 확인 완료`);
+    console.log(`[진단] ${season} A:O 검증 완료, P:AZ 보존`);
   }
 }
 await ensureHeader(NAMES.history,['시각','시즌','종류','상품번호','상품명','내용','상품 URL']);
@@ -784,7 +800,7 @@ const snapshotRows=await read("'좋아요_현황'!A2:J");
 const latestLikes=new Map();
 for(const line of snapshotRows){
   const code=String(line[0]||'').trim();
-  if(/^\\d{5,}$/.test(code))latestLikes.set(code,line);
+  if(/^\d{5,}$/.test(code))latestLikes.set(code,line);
 }
 let latestUpdated=0;
 console.log(`[진단] 좋아요 최신 스냅샷 ${latestLikes.size}개 로드`);
@@ -792,7 +808,7 @@ console.log(`[진단] 좋아요 최신 스냅샷 ${latestLikes.size}개 로드`)
 // 기존 26FW 행을 절대 삭제하거나 순서를 재배열하지 않는다. 상품번호 중복은 최초 행만 갱신한다.
 for(const season of allSeasons){
   const title=season;
-  const previous=await read(`'${title}'!A2:S`);
+  const previous=await read(`'${title}'!A2:O`);
   const previousIndex=new Map();
   previous.forEach((r,i)=>{const g=String(r[0]||'').trim();if(g&&!previousIndex.has(g))previousIndex.set(g,i);});
   const updates=[];
@@ -807,12 +823,12 @@ for(const season of allSeasons){
     const available=cur&&cur.status!=='GONE'?keys.filter(k=>cur.sizes[k]):[];
     const prior=previousIndex.has(goodsNo)?previous[previousIndex.get(goodsNo)]:[];
     const status=!r?'미등록 (기존 데이터)':!seasonMap.get('26FW')?'⏸ 시즌 OFF':!r.enabled?'⏸ 감시 OFF':!cur||cur.error?'대기 / 조회 실패':cur.status==='SALE'&&sold.length?'사이즈 품절':ko[cur.status]||cur.status;
-    const v=[goodsNo,cur?.name||r?.enteredName||prior[1]||'',isActive?'ON':'OFF',status,sold.join(', ')||prior[4]||'',available.join(', ')||prior[5]||'',cur?.issueSince?fmt(new Date(cur.issueSince)):prior[6]||'',cur?.lastAlert?fmt(new Date(cur.lastAlert)):prior[7]||'',isActive?stamp:prior[8]||'',...(function(){const l=latestLikes.get(goodsNo);if(!l)return [prior[9]??'',prior[10]??'',prior[11]??'',prior[12]??'',prior[13]??''];latestUpdated++;return [l[4]??prior[9]??'',l[5]??prior[10]??'',l[6]??prior[11]??'',l[8]??prior[12]??'',l[9]??prior[13]??''];})(),prior[14]??'',prior[15]??'',prior[16]??'',prior[17]??'',...(function(){const l=latestLikes.get(goodsNo);return [l&&l[2]&&l[3]?`${l[2]} ${l[3]}`:(prior[18]??'')];})()];
+    const v=[goodsNo,cur?.name||r?.enteredName||prior[1]||'',isActive?'ON':'OFF',status,sold.join(', ')||prior[4]||'',available.join(', ')||prior[5]||'',cur?.issueSince?fmt(new Date(cur.issueSince)):prior[6]||'',cur?.lastAlert?fmt(new Date(cur.lastAlert)):prior[7]||'',isActive?stamp:prior[8]||'',...(function(){const l=latestLikes.get(goodsNo);if(!l)return [prior[9]??'',prior[10]??'',prior[11]??'',prior[12]??'',prior[13]??''];latestUpdated++;return [l[4]??prior[9]??'',l[5]??prior[10]??'',l[6]??prior[11]??'',l[8]??prior[12]??'',l[9]??prior[13]??''];})(),(function(){const l=latestLikes.get(goodsNo);return l?(String(l[2]||'')+' '+String(l[3]||'')).trim():prior[14]??'';})()];
     if(previousIndex.has(goodsNo))updates.push({row:previousIndex.get(goodsNo)+2,v});
     else {const row=previous.length+2;previousIndex.set(goodsNo,previous.length);previous.push(v);updates.push({row,v});}
   }
   for(let i=0;i<updates.length;i+=100){
-    const data=updates.slice(i,i+100).map(u=>({range:`'${title}'!A${u.row}:S${u.row}`,values:[u.v]}));
+    const data=updates.slice(i,i+100).map(u=>({range:`'${title}'!A${u.row}:O${u.row}`,values:[u.v]}));
     await sheets.spreadsheets.values.batchUpdate({spreadsheetId:ID,requestBody:{valueInputOption:'RAW',data}});
   }
   console.log(`26FW 품절 현황: 기존 행 보존, ${updates.length}개 상품 연결/갱신, 좋아요 최신값 ${latestUpdated}개 갱신`);
