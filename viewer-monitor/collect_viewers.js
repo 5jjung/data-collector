@@ -639,7 +639,9 @@ const regHeader=(await read(`'${NAMES.registry}'!A1:ZZ1`))[0]||[];
 if(REG_HEADER.some((h,i)=>regHeader[i]!==h))throw Error('상품등록 헤더 불일치: 자동 이전하지 않고 중단합니다.');
 const seasonRows=await read(`'${NAMES.seasons}'!A2:C`);
 const seasonMap=new Map(seasonRows.filter(r=>SEASON_RE.test(String(r[0]||'').trim())).map(r=>[String(r[0]).trim(),truth(r[1])]));
-const suggested=['26FW']; // 새 시즌은 26FW만 추가; 기존 시즌설정 행은 삭제하지 않음
+// 상품등록에 등장한 모든 시즌을 자동 발견. 새 시즌은 반드시 OFF로 시작한다.
+const registeredSeasonNames=[...new Set((await read(`'${NAMES.registry}'!A2:A`)).map(r=>String(r[0]||'').trim().toUpperCase()).filter(x=>SEASON_RE.test(x)))];
+const suggested=registeredSeasonNames;
 const newSeasons=suggested.filter(x=>!seasonMap.has(x)).map(x=>[x,'OFF','필요한 시즌만 ON으로 변경']);
 if(newSeasons.length){await put(`'${NAMES.seasons}'!A${seasonRows.length+2}`,newSeasons);for(const r of newSeasons)seasonMap.set(r[0],false);}
 const ownerRows=await read(`'${NAMES.owners}'!A2:C`);
@@ -682,8 +684,9 @@ const rows=await read(`'${NAMES.registry}'!A2:ZZ`);
 const stateRows=await read(`'${NAMES.state}'!A2:D`);
 const state=new Map(stateRows.filter(r=>r[0]).map(r=>[String(r[0]),{old:safeJSON(r[1]),cache:safeJSON(r[2])}]));
 const productRows=rows.map((r,i)=>({index:i,season:String(r[0]||'').trim().toUpperCase(),goodsNo:/^\d{5,}$/.test(String(r[1]||'').trim())?String(r[1]).trim():null,enteredName:String(r[2]||'').trim(),enabled:r[3]===true||truth(r[3]),raw:r}));
-const allSeasons=['26FW']; // 다른 시즌 탭을 새로 만들지 않음
-const seasonTitles=['26FW'];
+// ON 시즌은 대시보드 생성 및 감시, OFF 시즌은 기존 탭과 기록을 그대로 보존.
+const allSeasons=[...new Set(productRows.map(r=>r.season).filter(x=>SEASON_RE.test(x)&&seasonMap.get(x)===true))];
+const seasonTitles=allSeasons.flatMap(x=>[x,`${x}좋아요_현황`]);
 const toCreate=seasonTitles.filter(x=>!byName.has(x));
 if(toCreate.length){const added=await sheets.spreadsheets.batchUpdate({spreadsheetId:ID,requestBody:{requests:toCreate.map(title=>({addSheet:{properties:{title}}}))}});for(const r of added.data.replies)byName.set(r.addSheet.properties.title,r.addSheet.properties.sheetId);}
 // 26FW의 기존 O:AZ는 이전 테스트 컬럼. 첫 실행에 별도 탭에 백업하고 O열만 새 용도로 전환.
@@ -725,7 +728,7 @@ await ensureHeader(NAMES.history,['시각','시즌','종류','상품번호','상
 // 옵션별 체크는 기본 TRUE로 초기화하고, 사용자가 해제하면 이후 자동 실행에서 유지한다.
 let optionHeaders=(await read(`'${NAMES.registry}'!F1:ZZ1`))[0]||[];
 const optionColumn=new Map(optionHeaders.map((v,i)=>[String(v),OPTION_START+i]).filter(x=>x[0]));
-const candidate=productRows.filter(r=>r.goodsNo&&r.enabled&&r.season==='26FW'&&seasonMap.get('26FW')===true); // 감시 OFF 대량 이관 상품은 API 조회하지 않음
+const candidate=productRows.filter(r=>r.goodsNo&&r.enabled&&seasonMap.get(r.season)===true); // 감시 OFF 대량 이관 상품은 API 조회하지 않음
 console.log('[진단] 시즌설정 26FW:', JSON.stringify({value:seasonMap.get('26FW'),raw:seasonRows.find(r=>String(r[0]).trim()==='26FW')}));
 console.log('[진단] 상품등록:', JSON.stringify({total:productRows.length, validNumbers:productRows.filter(r=>r.goodsNo).length, checked:productRows.filter(r=>r.enabled).length, checked26FW:productRows.filter(r=>r.enabled&&r.season==='26FW').length, candidates:candidate.length}));
 console.log('[진단] 6885281:', JSON.stringify(productRows.find(r=>r.goodsNo==='6885281')||{message:'상품등록에서 번호를 찾지 못함'}));
@@ -777,7 +780,7 @@ for(let i=0;i<checkboxRequests.length;i+=100)await sheets.spreadsheets.batchUpda
 for(let i=0;i<optionCellWrites.length;i+=100)await sheets.spreadsheets.values.batchUpdate({spreadsheetId:ID,requestBody:{valueInputOption:'RAW',data:optionCellWrites.slice(i,i+100)}});
 // 시즌 OFF 또는 상품 OFF면 감시 중단. 사이즈는 실제 옵션 중 체크된 항목만 감시.
 for(const r of productRows){const cur=fetched.get(r.goodsNo);r.w={only:[],skip:[]};if(cur&&!cur.error){for(const opt of Object.keys(cur.sizes||{})){const idx=optionColumn.get(opt);const v=r.raw[idx];if(v===false||String(v).toUpperCase()==='FALSE')r.w.skip.push(opt.toLowerCase());else r.w.only.push(opt.toLowerCase());}if(Object.keys(cur.sizes||{}).length&&!r.w.only.length)r.w.only=['__NO_OPTIONS_SELECTED__'];}}
-const grouped=new Map();for(const r of productRows){if(r.goodsNo&&r.enabled&&r.season==='26FW'&&seasonMap.get(r.season)===true){if(!grouped.has(r.goodsNo))grouped.set(r.goodsNo,[]);grouped.get(r.goodsNo).push(r);}}
+const grouped=new Map();for(const r of productRows){if(r.goodsNo&&r.enabled&&seasonMap.get(r.season)===true){if(!grouped.has(r.goodsNo))grouped.set(r.goodsNo,[]);grouped.get(r.goodsNo).push(r);}}
 const alerts=[],reminders=[],urgents=[],urgentGoods=[],logs=[],seasonLogs=new Map();let pending=(await read(`'${NAMES.pending}'!A2:C`)).filter(r=>r[1]&&r[2]).map(r=>({g:String(r[1]),line:String(r[2])}));const nextState=new Map(state);
 for(const [g,group] of grouped){const stored=state.get(g)||{};const cur=fetched.get(g)||await getProduct(g,stored.cache);if(cur.error){console.warn(`상품 ${g} 조회 실패: ${cur.error}`);for(const r of group)r.out=[stored.old?.name||'',`❓ 확인 실패 (${cur.error})`,'','','','',stamp];continue;}
 const old=stored.old;
@@ -812,17 +815,17 @@ for(const season of allSeasons){
   const previousIndex=new Map();
   previous.forEach((r,i)=>{const g=String(r[0]||'').trim();if(g&&!previousIndex.has(g))previousIndex.set(g,i);});
   const updates=[];
-  const registered=new Map(productRows.filter(r=>r.season==='26FW'&&r.goodsNo).map(r=>[r.goodsNo,r]));
+  const registered=new Map(productRows.filter(r=>r.season===season&&r.goodsNo).map(r=>[r.goodsNo,r]));
   const codes=[...new Set([...previousIndex.keys(),...registered.keys()])].filter(g=>/^\d{5,}$/.test(g));
   for(const goodsNo of codes){
     const r=registered.get(goodsNo);
     const cur=nextState.get(goodsNo)?.old||fetched.get(goodsNo);
-    const isActive=!!r&&seasonMap.get('26FW')===true&&r.enabled;
+    const isActive=!!r&&seasonMap.get(season)===true&&r.enabled;
     const keys=cur&&r?Object.keys(cur.sizes||{}).filter(k=>watched(r.w,k)):[];
     const sold=cur&&cur.status!=='GONE'?keys.filter(k=>!cur.sizes[k]):[];
     const available=cur&&cur.status!=='GONE'?keys.filter(k=>cur.sizes[k]):[];
     const prior=previousIndex.has(goodsNo)?previous[previousIndex.get(goodsNo)]:[];
-    const status=!r?'미등록 (기존 데이터)':!seasonMap.get('26FW')?'⏸ 시즌 OFF':!r.enabled?'⏸ 감시 OFF':!cur||cur.error?'대기 / 조회 실패':cur.status==='SALE'&&sold.length?'사이즈 품절':ko[cur.status]||cur.status;
+    const status=!r?'미등록 (기존 데이터)':!seasonMap.get(season)?'⏸ 시즌 OFF':!r.enabled?'⏸ 감시 OFF':!cur||cur.error?'대기 / 조회 실패':cur.status==='SALE'&&sold.length?'사이즈 품절':ko[cur.status]||cur.status;
     const v=[goodsNo,cur?.name||r?.enteredName||prior[1]||'',isActive?'ON':'OFF',status,sold.join(', ')||prior[4]||'',available.join(', ')||prior[5]||'',cur?.issueSince?fmt(new Date(cur.issueSince)):prior[6]||'',cur?.lastAlert?fmt(new Date(cur.lastAlert)):prior[7]||'',isActive?stamp:prior[8]||'',...(function(){const l=latestLikes.get(goodsNo);if(!l)return [prior[9]??'',prior[10]??'',prior[11]??'',prior[12]??'',prior[13]??''];latestUpdated++;return [l[4]??prior[9]??'',l[5]??prior[10]??'',l[6]??prior[11]??'',l[8]??prior[12]??'',l[9]??prior[13]??''];})(),(function(){const l=latestLikes.get(goodsNo);return l?(String(l[2]||'')+' '+String(l[3]||'')).trim():prior[14]??'';})()];
     if(previousIndex.has(goodsNo))updates.push({row:previousIndex.get(goodsNo)+2,v});
     else {const row=previous.length+2;previousIndex.set(goodsNo,previous.length);previous.push(v);updates.push({row,v});}
@@ -831,7 +834,7 @@ for(const season of allSeasons){
     const data=updates.slice(i,i+100).map(u=>({range:`'${title}'!A${u.row}:O${u.row}`,values:[u.v]}));
     await sheets.spreadsheets.values.batchUpdate({spreadsheetId:ID,requestBody:{valueInputOption:'RAW',data}});
   }
-  console.log(`26FW 품절 현황: 기존 행 보존, ${updates.length}개 상품 연결/갱신, 좋아요 최신값 ${latestUpdated}개 갱신`);
+  console.log(`${season} 품절 현황: 기존 행 보존, ${updates.length}개 상품 연결/갱신, 좋아요 최신값 ${latestUpdated}개 갱신`);
 }
 // Keep prior rows for excluded products, remove rows for deleted products only.
 // 상태 저장은 Slack 긴급 알림 전송 결과를 반영한 후 수행한다.
@@ -841,13 +844,13 @@ await send(`🔔 *무신사 상품 변동* (${alerts.length}건)`,alerts);await 
 const urgentDelivered=await send(`🚨 *15:00 MD 승인/조치 최종 확인* (${urgents.length}건)`,urgents);
 if(urgentDelivered&&urgents.length){for(const g of urgentGoods){const item=nextState.get(g);if(item?.old)item.old.lastUrgentDate=kst.date;}
   const urgentLog=urgentGoods.map(g=>[stamp,'15시 긴급 점검',nextState.get(g)?.old?.name||g,'미해결 상태 MD 확인 요청',url(g)]);logs.push(...urgentLog);
-  for(const g of urgentGoods){seasonLogs.set('26FW',[...(seasonLogs.get('26FW')||[]),[stamp,'15시 긴급 점검',g,nextState.get(g)?.old?.name||g,'미해결 상태 MD 확인 요청',url(g),'']]);}
+  for(const g of urgentGoods){for(const season of new Set(grouped.get(g)?.map(r=>r.season)||[]))seasonLogs.set(season,[...(seasonLogs.get(season)||[]),[stamp,'15시 긴급 점검',g,nextState.get(g)?.old?.name||g,'미해결 상태 MD 확인 요청',url(g),'']]);}
 }
 const all=Array.from(nextState.entries()).map(([g,v])=>[g,JSON.stringify(v.old||null),JSON.stringify(v.cache||null),stamp]);await sheets.spreadsheets.values.clear({spreadsheetId:ID,range:`'${NAMES.state}'!A2:D`});if(all.length)await put(`'${NAMES.state}'!A2`,all);
 // 대기 알림은 별도 탭에 저장 (기존 품절_설정 탭은 읽거나 수정하지 않는다).
 await sheets.spreadsheets.values.clear({spreadsheetId:ID,range:`'${NAMES.pending}'!A2:C`});
 if(pending.length)await put(`'${NAMES.pending}'!A2`,pending.slice(-100).map(p=>[stamp,p.g,p.line]));
-for(const [season,entries] of seasonLogs){if(entries.length&&season==='26FW')await sheets.spreadsheets.values.append({spreadsheetId:ID,range:`'${NAMES.history}'!A:G`,valueInputOption:'RAW',insertDataOption:'INSERT_ROWS',requestBody:{values:entries.map(x=>[x[0],season,x[1],x[2],x[3],x[4],x[5]])}});}
+for(const [season,entries] of seasonLogs){if(entries.length)await sheets.spreadsheets.values.append({spreadsheetId:ID,range:`'${NAMES.history}'!A:G`,valueInputOption:'RAW',insertDataOption:'INSERT_ROWS',requestBody:{values:entries.map(x=>[x[0],season,x[1],x[2],x[3],x[4],x[5]])}});}
 if(logs.length)await sheets.spreadsheets.values.append({spreadsheetId:ID,range:`'${NAMES.log}'!A:E`,valueInputOption:'RAW',insertDataOption:'INSERT_ROWS',requestBody:{values:logs}});
 console.log(`품절 모니터링 완료: ${grouped.size}개 상품, 변동 ${alerts.length}건, 재알림 ${reminders.length}건, 대기 ${pending.length}건`);
 }
@@ -883,9 +886,8 @@ async function ensureViewerHistoryTab() {
 
 async function runIntegrated() {
   const mode = (process.env.MONITOR_MODE || 'auto').toLowerCase();
-  const minute = new Date().getUTCMinutes();
-  const doViewer = mode === 'both' || mode === 'viewer' || (mode === 'auto' && minute % 30 < 10);
-  const doStock = mode === 'both' || mode === 'stock' || (mode === 'auto' && minute % 30 < 10);
+  const doViewer = mode === 'both' || mode === 'viewer' || mode === 'auto';
+  const doStock = mode === 'both' || mode === 'stock' || mode === 'auto';
   const errors = [];
   if (doViewer || doStock) await ensureViewerHistoryTab();
   if (doViewer) {
