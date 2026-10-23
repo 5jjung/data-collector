@@ -425,6 +425,7 @@ async function main() {
   );
   console.log(`   -> 총 ${uniqueProducts.length}개 상품 (중복 제거 후)\n`);
 
+  if (!uniqueProducts.length) throw new Error('상품 목록 0개: 기존 스냅샷과 기록 보호를 위해 수집 중단');
   const likeMap = await fetchLikes(uniqueProducts.map((p) => p.code));
 
   console.log('[3/5] 각 상품 보는인원 확인 중...');
@@ -521,17 +522,20 @@ async function main() {
   // ─── 시트 기록 ──────────────────────────────────────────
   console.log('[5/5] 구글시트에 기록 중...');
 
-  // 보는인원 기준 통과한 상품만 기록용 탭에 남김 (전체를 다 쌓으면 너무 빨리 커짐)
+  // 모든 정상 수집 상품의 30분 단위 기록을 누적. 알림 기준 50명은 별도로 적용.
   const hot = all.filter((p) => typeof p.viewers === 'number' && p.viewers >= VIEWER_THRESHOLD);
-  const logRows = hot.map((p) => [
+  const loggable = all.filter((p) => p.like !== null || p.viewers !== null);
+  const logRows = loggable.map((p) => [
     p.code, p.name, p.date, p.time, p.viewers,
     p.like ?? '', p.delta ?? '', p.todayDelta ?? '',
   ]);
 
   if (logRows.length > 0) await appendLog(sheets, logRows);
-  else console.log(`   -> ${VIEWER_THRESHOLD}명 이상인 상품이 없어서 기록은 건너뜁니다.`);
+  else console.log('   -> 정상 수집된 좋아요/보는 사람 수가 없어 기록을 건너뜁니다.');
+  console.log(`[진단] 좋아요 수집 ${all.filter(p => p.like !== null).length}개 / 기록 신규 ${logRows.length}행`);
 
-  await writeSnapshot(sheets, all);
+  if (all.some(p => p.like !== null)) await writeSnapshot(sheets, all);
+  else console.warn('[경고] 좋아요 API 데이터 0개: 기존 좋아요 스냅샷 보존');
   await writeMissing(sheets, missingMap);
 
   // 보는인원은 기준 미달이지만 좋아요가 확 붙은 상품
@@ -583,7 +587,7 @@ const IMPORT_SEASON='26FW';
 const SEASON_HEADER=['시즌','감시 ON/OFF','설명'];
 const OWNER_HEADER=['담당자명','Slack 멤버 ID','사용 여부'];
 const SEASON_RE=/^\d{2}(SS|FW)$/;
-const BASE_SEASON_HEADER=['상품번호','상품명','감시 여부','판매 상태','품절 옵션','판매중 옵션','문제 발생 시각','마지막 알림','마지막 확인','현재 좋아요','직전 좋아요','좋아요 증감','오늘 좋아요 증가','최근 보는 사람 수','리스팅 이탈 여부','이탈 구분','이탈 날짜','마지막 좋아요'];
+const BASE_SEASON_HEADER=['상품번호','상품명','감시 여부','판매 상태','품절 옵션','판매중 옵션','문제 발생 시각','마지막 알림','마지막 확인','현재 좋아요','직전 좋아요','좋아요 증감','오늘 좋아요 증가','최근 보는 사람 수','리스팅 이탈 여부','이탈 구분','이탈 날짜','마지막 좋아요','좋아요 확인 시각'];
 const SEASON_LOG_HEADER=['시각','종류','상품번호','상품명','내용','상품 URL'];
 const OPTION_START=5; // 상품등록 F열부터 실제 옵션명 헤더를 동적으로 추가 (E열 URL)
 const STATE_HEADER=['상품번호','이전 상태 JSON','옵션 캐시 JSON','업데이트 시각'];
@@ -682,7 +686,12 @@ const allSeasons=['26FW']; // 다른 시즌 탭을 새로 만들지 않음
 const seasonTitles=['26FW'];
 const toCreate=seasonTitles.filter(x=>!byName.has(x));
 if(toCreate.length){const added=await sheets.spreadsheets.batchUpdate({spreadsheetId:ID,requestBody:{requests:toCreate.map(title=>({addSheet:{properties:{title}}}))}});for(const r of added.data.replies)byName.set(r.addSheet.properties.title,r.addSheet.properties.sheetId);}
-for(const season of allSeasons)await ensureHeader(season,BASE_SEASON_HEADER);
+// 기존 26FW A:R 헤더를 보호하고, 새 S열만 추가한다.
+for(const season of allSeasons){
+  const existingHead=(await read(`'${season}'!A1:S1`))[0]||[];
+  if(existingHead.length===18 && BASE_SEASON_HEADER.slice(0,18).every((h,i)=>existingHead[i]===h)) await put(`'${season}'!S1`,[['좋아요 확인 시각']]);
+  await ensureHeader(season,BASE_SEASON_HEADER);
+}
 await ensureHeader(NAMES.history,['시각','시즌','종류','상품번호','상품명','내용','상품 URL']);
 // 상품등록: 옵션은 상품 API가 제공한 실제 옵션명으로만 열을 추가한다.
 // 옵션별 체크는 기본 TRUE로 초기화하고, 사용자가 해제하면 이후 자동 실행에서 유지한다.
@@ -777,15 +786,15 @@ for(const season of allSeasons){
     const available=cur&&cur.status!=='GONE'?keys.filter(k=>cur.sizes[k]):[];
     const prior=previousIndex.has(goodsNo)?previous[previousIndex.get(goodsNo)]:[];
     const status=!r?'미등록 (기존 데이터)':!seasonMap.get('26FW')?'⏸ 시즌 OFF':!r.enabled?'⏸ 감시 OFF':!cur||cur.error?'대기 / 조회 실패':cur.status==='SALE'&&sold.length?'사이즈 품절':ko[cur.status]||cur.status;
-    const v=[goodsNo,cur?.name||r?.enteredName||prior[1]||'',isActive?'ON':'OFF',status,sold.join(', ')||prior[4]||'',available.join(', ')||prior[5]||'',cur?.issueSince?fmt(new Date(cur.issueSince)):prior[6]||'',cur?.lastAlert?fmt(new Date(cur.lastAlert)):prior[7]||'',isActive?stamp:prior[8]||'',prior[9]??'',prior[10]??'',prior[11]??'',prior[12]??'',prior[13]??'',prior[14]??'',prior[15]??'',prior[16]??'',prior[17]??''];
+    const v=[goodsNo,cur?.name||r?.enteredName||prior[1]||'',isActive?'ON':'OFF',status,sold.join(', ')||prior[4]||'',available.join(', ')||prior[5]||'',cur?.issueSince?fmt(new Date(cur.issueSince)):prior[6]||'',cur?.lastAlert?fmt(new Date(cur.lastAlert)):prior[7]||'',isActive?stamp:prior[8]||'',...(function(){const l=latestLikes.get(goodsNo);if(!l)return [prior[9]??'',prior[10]??'',prior[11]??'',prior[12]??'',prior[13]??''];latestUpdated++;return [l[4]??prior[9]??'',l[5]??prior[10]??'',l[6]??prior[11]??'',l[8]??prior[12]??'',l[9]??prior[13]??''];})(),prior[14]??'',prior[15]??'',prior[16]??'',prior[17]??'',...(function(){const l=latestLikes.get(goodsNo);return [l&&l[2]&&l[3]?`${l[2]} ${l[3]}`:(prior[18]??'')];})()];
     if(previousIndex.has(goodsNo))updates.push({row:previousIndex.get(goodsNo)+2,v});
     else {const row=previous.length+2;previousIndex.set(goodsNo,previous.length);previous.push(v);updates.push({row,v});}
   }
   for(let i=0;i<updates.length;i+=100){
-    const data=updates.slice(i,i+100).map(u=>({range:`'${title}'!A${u.row}:R${u.row}`,values:[u.v]}));
+    const data=updates.slice(i,i+100).map(u=>({range:`'${title}'!A${u.row}:S${u.row}`,values:[u.v]}));
     await sheets.spreadsheets.values.batchUpdate({spreadsheetId:ID,requestBody:{valueInputOption:'RAW',data}});
   }
-  console.log(`26FW 품절 현황: 기존 행 보존, ${updates.length}개 상품 연결/갱신`);
+  console.log(`26FW 품절 현황: 기존 행 보존, ${updates.length}개 상품 연결/갱신, 좋아요 최신값 ${latestUpdated}개 갱신`);
 }
 // Keep prior rows for excluded products, remove rows for deleted products only.
 // 상태 저장은 Slack 긴급 알림 전송 결과를 반영한 후 수행한다.
