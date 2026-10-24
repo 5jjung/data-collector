@@ -36,8 +36,7 @@ const DRY_RUN = process.env.DRY_RUN === '1';
 // 테스트 시각 흉내내기: 실수로 운영에서 켜지지 않게 DRY_RUN일 때만 허용
 const TEST_NOW_TEXT = (process.env.TEST_NOW || '').trim(); // 앞뒤 빈칸 제거
 const TEST_NOW = DRY_RUN && TEST_NOW_TEXT ? new Date(`${TEST_NOW_TEXT}:00+09:00`) : null;
-if (TEST_NOW && isNaN(TEST_NOW)) throw new Error(`TEST_NOW 형식 오류: "${TEST_NOW_TEXT}" (예: 2026-10-24T15:00)`); (예: 2026-10-24T15:00)`);
-// 코드 전체에서 "지금"은 이 함수로만 구합니다.
+if (TEST_NOW && isNaN(TEST_NOW)) throw new Error(`TEST_NOW 형식 오류: "${TEST_NOW_TEXT}" (예: 2026-10-24T15:00)`);
 function currentTime() { return TEST_NOW ? new Date(TEST_NOW) : new Date(); }
 
 // 한국시간 요일/시/분 꺼내기
