@@ -1,7 +1,24 @@
+# ============================================================
+# 테스트 시트 전용 (수동 실행만)
+# - monitor-test/collect_viewers.js 는 운영 파일과 "똑같은 내용"으로 복사해 두고 테스트합니다.
+# - DRY_RUN=1 : 슬랙을 실제로 보내지 않고, 보냈을 메시지를 로그에 출력
+# - test_now  : 한국시간을 흉내냄 (예: 2026-10-24T15:00 = 토요일 15시). 비우면 진짜 현재 시각.
+# ============================================================
 name: 무신사 품절 모니터링 테스트 (수동 전용)
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: '실행 대상'
+        required: true
+        default: both
+        type: choice
+        options: [both, viewer, stock]
+      test_now:
+        description: '가정할 한국시간 (예: 2026-10-24T15:00). 비우면 현재 시각'
+        required: false
+        default: ''
 
 jobs:
   test-stock:
@@ -25,7 +42,9 @@ jobs:
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           VIEWER_SPREADSHEET_ID: ${{ vars.TEST_SPREADSHEET_ID }}
-          MONITOR_MODE: both
+          MONITOR_MODE: ${{ github.event.inputs.mode || 'both' }}
           SLACK_WEBHOOK_URL: ''
           SLACK_WEBHOOK_STOCK: ''
+          DRY_RUN: '1'
+          TEST_NOW: ${{ github.event.inputs.test_now }}
         run: node collect_viewers.js
