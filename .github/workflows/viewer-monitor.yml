@@ -1,3 +1,11 @@
+# ============================================================
+# 품절(옵션) 감시 — 평일 자동 실행
+# - 예약 실행은 항상 MONITOR_MODE=stock (품절만). 좋아요/시청자는 musinsa-viewer-24h.yml 담당.
+# - 한국시간 평일 09:00~18:30, 30분마다 실행 (UTC 00:00~09:30)
+#   ※ 18:00, 18:30 실행은 상태만 저장하고, 생긴 변동은 '품절_대기알림'에 쌓였다가
+#     다음 평일 09:00 이후 첫 실행에 발송됩니다. (슬랙 허용 시간은 코드의 STOCK_SLACK_HOURS)
+# - 수동 실행(Run workflow)은 mode 선택 가능. 주말에 눌러도 품절 슬랙은 코드에서 차단됩니다.
+# ============================================================
 name: 실시간 관심고객수 + 품절 통합 모니터링
 
 on:
@@ -9,13 +17,14 @@ on:
       mode:
         description: '수동 실행 대상'
         required: true
-        default: both
+        default: stock
         type: choice
         options:
-          - both
-          - viewer
           - stock
+          - viewer
+          - both
 
+# 같은 시트를 쓰는 워크플로는 모두 같은 그룹 → 동시에 두 개가 시트를 덮어쓰지 않게 줄 세움
 concurrency:
   group: musinsa-integrated-monitor
   cancel-in-progress: false
@@ -23,6 +32,8 @@ concurrency:
 jobs:
   check-monitor:
     runs-on: ubuntu-latest
+    # [수정] 멈춘 실행이 그룹을 6시간 동안 막지 않도록 25분에서 강제 종료
+    timeout-minutes: 25
     permissions:
       contents: read
     defaults:
