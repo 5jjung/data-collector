@@ -5,18 +5,95 @@
 // 필요한 환경변수:
 //   GOOGLE_SERVICE_ACCOUNT_JSON  -> 서비스계정 키 파일 내용 전체(JSON 텍스트)
 //   VIEWER_SPREADSHEET_ID        -> 이 모니터링 전용 새 스프레드시트 ID
-//   SLACK_WEBHOOK_URL            -> 슬랙 알림용 (없으면 알림만 건너뜀)
+//   SLACK_WEBHOOK_URL            -> 좋아요/시청자 슬랙 채널 (없으면 알림만 건너뜀)
+//   SLACK_WEBHOOK_STOCK          -> 품절 슬랙 채널
+//   MONITOR_MODE                 -> viewer(좋아요·시청자만) / stock(품절만) / both(둘 다)
+//
+// 테스트 전용 환경변수 (운영 워크플로에는 넣지 않습니다):
+//   DRY_RUN=1    -> 슬랙을 실제로 보내지 않고 "보냈을 메시지"를 로그에만 출력
+//   TEST_NOW=2026-10-24T15:00  -> 한국시간을 이 시각으로 가정 (DRY_RUN=1일 때만 동작)
+//
+// ★ 이번 수정 위치는 파일에서 "[수정" 으로 검색하면 모두 찾을 수 있습니다.
 
 const { chromium } = require('playwright');
 const { google } = require('googleapis');
 
+// ─────────────────────────────────────────────────────────
+// [수정1] 품절 알림 "보내도 되는 시간"을 한 곳에서만 정합니다.
+//   - 좋아요 쪽(리스팅 이탈 알림)과 품절 쪽(옵션 감시) 둘 다 이 함수를 씁니다.
+//   - 시간을 바꾸고 싶으면 STOCK_SLACK_HOURS 숫자만 고치면 됩니다.
+//   - 토/일은 무조건 막습니다. (15시 긴급 알림도 여기서 같이 막힘)
+// ─────────────────────────────────────────────────────────
+const STOCK_SLACK_HOURS = Object.freeze({
+  start: 9 * 60,             // 09:00 부터
+  end: 18 * 60,              // 18:00 전까지
+  lunchStart: 12 * 60,       // 12:00 부터
+  lunchEnd: 13 * 60 + 30,    // 13:30 전까지는 점심시간 → 막음
+  weekendDays: ['Sat', 'Sun'],
+});
+
+const DRY_RUN = process.env.DRY_RUN === '1';
+// 테스트 시각 흉내내기: 실수로 운영에서 켜지지 않게 DRY_RUN일 때만 허용
+const TEST_NOW = DRY_RUN && process.env.TEST_NOW ? new Date(`${process.env.TEST_NOW}:00+09:00`) : null;
+if (TEST_NOW && isNaN(TEST_NOW)) throw new Error(`TEST_NOW 형식 오류: ${process.env.TEST_NOW} (예: 2026-10-24T15:00)`);
+// 코드 전체에서 "지금"은 이 함수로만 구합니다.
+function currentTime() { return TEST_NOW ? new Date(TEST_NOW) : new Date(); }
+
+// 한국시간 요일/시/분 꺼내기
+function kstClock(date) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Seoul', weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(date);
+  const get = (type) => parts.find((p) => p.type === type)?.value;
+  return { weekday: get('weekday'), minutes: Number(get('hour')) * 60 + Number(get('minute')) };
+}
+
+// true = 지금 품절 슬랙을 보내도 됨 / false = 보내면 안 됨
+function isStockSlackTime(date = currentTime()) {
+  const { weekday, minutes } = kstClock(date);
+  const h = STOCK_SLACK_HOURS;
+  if (h.weekendDays.includes(weekday)) return false;
+  if (minutes < h.start || minutes >= h.end) return false;
+  if (minutes >= h.lunchStart && minutes < h.lunchEnd) return false;
+  return true;
+}
+
+// ─────────────────────────────────────────────────────────
+// [수정2] "이 메시지를 누가 보냈나?" 진단 정보
+//   GitHub Actions가 자동으로 넣어주는 환경변수를 읽습니다. (설정 불필요)
+//   로그 맨 위와 슬랙 메시지 맨 아래에 찍혀서, 앞으로 이상한 알림이 오면
+//   어느 워크플로 / 어떤 모드 / 어느 커밋이 보냈는지 바로 알 수 있습니다.
+// ─────────────────────────────────────────────────────────
+const RUN_INFO = {
+  workflow: process.env.GITHUB_WORKFLOW || '로컬실행',
+  event: process.env.GITHUB_EVENT_NAME || '-',          // schedule(예약) / workflow_dispatch(수동)
+  sha: (process.env.GITHUB_SHA || '-').slice(0, 7),     // 실행에 쓰인 코드 버전
+  runId: process.env.GITHUB_RUN_ID || '-',
+  mode: (process.env.MONITOR_MODE || 'auto').toLowerCase(),
+};
+function runFooter() {
+  return `_발신: ${RUN_INFO.workflow} · ${RUN_INFO.event} · mode=${RUN_INFO.mode} · ${RUN_INFO.sha} · run ${RUN_INFO.runId}_`;
+}
+
 // ===== 설정 =====
-const LISTING_URLS = [
-  'https://www.musinsa.com/brand/codegraphy/products?tag=26FALL&gf=A',
-  'https://www.musinsa.com/brand/codegraphy/products?tag=26WINTER&gf=A',
+// [수정4] 시즌별 좋아요 수집 설정.
+//   season : 시트 탭 이름 앞부분 (예: 26FW → '26FW좋아요_현황' 탭에 누적)
+//   tags   : 무신사 브랜드 페이지 주소의 tag= 값
+//   ★ 27SS를 추가하려면 아래 주석의 줄을 풀고 tag 값을 실제 무신사 주소에 맞게 바꾸세요.
+//     (무신사 브랜드 페이지에서 시즌 탭을 눌렀을 때 주소창의 tag= 값)
+const VIEWER_SEASONS = [
+  { season: '26FW', tags: ['26FALL', '26WINTER'] },
+  // { season: '27SS', tags: ['27SPRING', '27SUMMER'] },
 ];
+const listingUrl = (tag) => `https://www.musinsa.com/brand/codegraphy/products?tag=${tag}&gf=A`;
 const SPREADSHEET_ID = process.env.VIEWER_SPREADSHEET_ID;
-const SHEET_NAME = '26FW좋아요_현황';   // 기존 시트1을 이름만 변경하여 누적 기록 유지
+const SHEET_NAME = '26FW좋아요_현황';   // 기존 시트1을 이름만 변경하여 누적 기록 유지 (26FW 전용)
+const seasonLogSheet = (season) => `${season}좋아요_현황`; // 시즌별 누적 탭 이름 규칙
+const LIKE_LOG_HEADER = ['상품번호', '상품명', '날짜', '시간', '보는 사람 수', '좋아요', '직전 대비 증감', '오늘 증가분'];
+// [수정3] 리스팅 이탈 품절 알림(🚨/⚠️/↩️)을 상품등록 D열 감시와 맞춥니다.
+//   'on_only'  : 상품등록 D열 ON + 시즌설정 ON 인 상품만 알림 (권장, 기본값)
+//   'skip_off' : D열이 OFF인 상품만 빼고, 상품등록에 없는 상품은 계속 알림
+const LISTING_ALERT_POLICY = 'on_only';
 const SNAPSHOT_SHEET = '좋아요_현황';     // 직전 좋아요 값 보관 탭 (없으면 자동 생성)
 const MISSING_SHEET = '품절_추적';        // 리스팅에서 사라진 상품 보관 탭 (없으면 자동 생성)
 const VIEWER_THRESHOLD = 50;             // 보는인원 알림 기준
@@ -39,7 +116,7 @@ function numOrNull(v) {
 }
 
 function nowKST() {
-  const now = new Date(Date.now() + 9 * 60 * 60 * 1000);
+  const now = new Date(currentTime().getTime() + 9 * 60 * 60 * 1000);
   return { date: now.toISOString().slice(0, 10), time: now.toISOString().slice(11, 16) };
 }
 
@@ -209,6 +286,23 @@ async function ensureSheets(sheets, titles) {
   });
 }
 
+// [수정8] 안전한 덮어쓰기: "먼저 새 값을 쓰고 → 남는 아래쪽 줄만 지움"
+//   예전 방식(먼저 전부 지우고 → 새로 쓰기)은 쓰기 도중 에러가 나면 탭이 텅 비었습니다.
+//   이 방식은 중간에 실패해도 최소한 예전 값 또는 새 값이 남습니다.
+//   tab: 탭 이름, lastCol: 마지막 열 글자(예: 'J'), values: 헤더 포함 2차원 배열(1행부터)
+async function safeOverwrite(sheets, tab, lastCol, values) {
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `'${tab}'!A1`,
+    valueInputOption: 'USER_ENTERED',
+    requestBody: { values },
+  });
+  await sheets.spreadsheets.values.clear({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `'${tab}'!A${values.length + 1}:${lastCol}`,
+  });
+}
+
 // 직전 회차 좋아요 값 읽기
 async function readSnapshot(sheets) {
   try {
@@ -248,16 +342,7 @@ async function writeSnapshot(sheets, all) {
     p.todayBase ?? '', p.todayDelta ?? '', p.viewers ?? '',
   ]);
 
-  await sheets.spreadsheets.values.clear({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `${SNAPSHOT_SHEET}!A:J`,
-  });
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `${SNAPSHOT_SHEET}!A1`,
-    valueInputOption: 'USER_ENTERED',
-    requestBody: { values: [header, ...rows] },
-  });
+  await safeOverwrite(sheets, SNAPSHOT_SHEET, 'J', [header, ...rows]); // [수정8]
   console.log(`   -> '${SNAPSHOT_SHEET}' 탭 ${rows.length}행 갱신 완료`);
 }
 
@@ -293,36 +378,96 @@ async function writeMissing(sheets, missingMap) {
     code, m.name, m.date, m.time, m.reason, m.like ?? '',
   ]);
 
-  await sheets.spreadsheets.values.clear({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `${MISSING_SHEET}!A:F`,
-  });
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `${MISSING_SHEET}!A1`,
-    valueInputOption: 'USER_ENTERED',
-    requestBody: { values: [header, ...rows] },
-  });
+  await safeOverwrite(sheets, MISSING_SHEET, 'F', [header, ...rows]); // [수정8]
   console.log(`   -> '${MISSING_SHEET}' 탭 ${rows.length}행 갱신 완료`);
 }
 
-// 기록용 탭에 추가 (A~H열)
-async function appendLog(sheets, rows) {
+// 기록용 탭에 추가 (A~H열) — append(맨 아래에 붙이기)만 사용. 기존 행은 절대 건드리지 않음.
+// [수정4] 시즌별 탭 이름을 받도록 변경 (기본값은 기존 26FW좋아요_현황)
+async function appendLog(sheets, rows, sheetName = SHEET_NAME) {
   await sheets.spreadsheets.values.append({
     spreadsheetId: SPREADSHEET_ID,
-    range: `${SHEET_NAME}!A:H`,
+    range: `'${sheetName}'!A:H`,
     valueInputOption: 'USER_ENTERED',
+    insertDataOption: 'INSERT_ROWS',
     requestBody: { values: rows },
   });
-  console.log(`   -> '${SHEET_NAME}' 탭에 ${rows.length}개 행 기록 완료`);
+  console.log(`   -> '${sheetName}' 탭에 ${rows.length}개 행 기록 완료`);
+}
+
+// [수정4] 새 시즌 누적 탭(예: 27SS좋아요_현황)이 비어 있으면 1행에 제목만 넣음.
+//   이미 무언가 들어 있으면(26FW처럼) 아무것도 하지 않습니다.
+async function ensureLogHeader(sheets, sheetName) {
+  const res = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: `'${sheetName}'!A1:H1` });
+  const first = (res.data.values || [])[0] || [];
+  if (first.some((v) => String(v).trim())) return;
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SPREADSHEET_ID, range: `'${sheetName}'!A1`,
+    valueInputOption: 'RAW', requestBody: { values: [LIKE_LOG_HEADER] },
+  });
+  console.log(`   [안내] '${sheetName}' 탭이 비어 있어 제목줄만 추가했습니다.`);
+}
+
+// [수정3] 상품등록 D열 + 시즌설정을 "읽기만" 해서 품절 알림 대상 여부를 판단하는 지도 만들기.
+//   반환: { ok: 읽기 성공 여부, status: Map(상품번호 → 'ON' | 'OFF') }
+//   한 상품번호가 여러 줄이면 하나라도 ON이면 ON (품절 모니터와 같은 규칙)
+async function readWatchStatus(sheets) {
+  try {
+    const get = async (range) => (await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range })).data.values || [];
+    const truthy = (v) => v === true || /^(예|y|yes|o|true|on|1)$/i.test(String(v || '').trim());
+    const seasonOn = new Map((await get(`'시즌설정'!A2:B`)).map((r) => [String(r[0] || '').trim().toUpperCase(), truthy(r[1])]));
+    const status = new Map();
+    for (const r of await get(`'상품등록'!A2:D`)) {
+      const code = String(r[1] || '').trim();
+      if (!/^\d{5,}$/.test(code)) continue;
+      const on = truthy(r[3]) && seasonOn.get(String(r[0] || '').trim().toUpperCase()) === true;
+      if (on) status.set(code, 'ON');
+      else if (!status.has(code)) status.set(code, 'OFF');
+    }
+    return { ok: true, status };
+  } catch (e) {
+    console.log(`   [경고] 상품등록/시즌설정 읽기 실패 → 이번 회차 품절 슬랙은 안전하게 보내지 않음: ${e.message}`);
+    return { ok: false, status: new Map() };
+  }
+}
+
+// 정책에 따라 "이 상품의 품절 알림을 보내도 되나?"
+function listingAlertAllowed(watch, code) {
+  if (!watch.ok) return false;
+  const st = watch.status.get(code);
+  if (LISTING_ALERT_POLICY === 'skip_off') return st !== 'OFF';
+  return st === 'ON';
 }
 
 // ─────────────────────────────────────────────────────────
 // 4. 슬랙 알림
 // ─────────────────────────────────────────────────────────
-async function sendSlackAlert({ hot, spikes, soldOut, needCheck, returned, stamp }) {
+// 품절 관련 Slack 알림은 한국시간 평일 09:00~12:00, 13:30~18:00에만 허용. ([수정1] 공통 함수 사용)
+// 좋아요/실시간 시청자 알림은 기존처럼 24시간 유지.
+function viewerStockSlackAllowed(date = currentTime()) {
+  return isStockSlackTime(date);
+}
+
+async function sendSlackAlert({ hot, spikes, soldOut, needCheck, returned, stamp, watch }) {
+  // [수정3] 상품등록 D열 OFF(또는 시즌 OFF) 상품은 품절 블록에서 뺍니다.
+  //   좋아요/시청자(hot, spikes)는 감시 ON/OFF와 상관없이 그대로 보냅니다.
+  const before = soldOut.length + needCheck.length + returned.length;
+  soldOut = soldOut.filter((m) => listingAlertAllowed(watch, m.code));
+  needCheck = needCheck.filter((m) => listingAlertAllowed(watch, m.code));
+  returned = returned.filter((m) => listingAlertAllowed(watch, m.code));
+  const removedByOff = before - (soldOut.length + needCheck.length + returned.length);
+  if (removedByOff > 0) console.log(`[슬랙] 감시 OFF/미등록 상품 ${removedByOff}건은 품절 알림에서 제외 (정책: ${LISTING_ALERT_POLICY})`);
+
+  // 품절 추적/기록(품절_추적 탭)은 유지하되 업무시간 외 Slack 메시지만 제외.
+  if (!viewerStockSlackAllowed()) {
+    const blocked = soldOut.length + needCheck.length + returned.length;
+    soldOut = [];
+    needCheck = [];
+    returned = [];
+    console.log(`[슬랙] 업무시간 외: 좋아요/시청자 알림만 발송 (품절 알림 ${blocked}건 제외)`);
+  }
   const webhookUrl = process.env.SLACK_WEBHOOK_URL;
-  if (!webhookUrl) {
+  if (!webhookUrl && !DRY_RUN) {
     console.log('   [안내] SLACK_WEBHOOK_URL이 없어서 슬랙 알림은 건너뜁니다.');
     return;
   }
@@ -388,10 +533,16 @@ async function sendSlackAlert({ hot, spikes, soldOut, needCheck, returned, stamp
     blocks.push(`↩️ 다시 올라옴 — 재입고 반영됨\n\n${lines}`);
   }
 
+  // [수정2] 메시지 맨 아래에 "누가 보냈는지" 한 줄 추가
+  const text = blocks.join('\n\n───────────────\n\n') + '\n\n' + runFooter();
+  if (DRY_RUN) {
+    console.log(`[DRY-RUN] 좋아요 채널로 보냈을 메시지:\n${text}`);
+    return;
+  }
   const res = await fetch(webhookUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text: blocks.join('\n\n───────────────\n\n') }),
+    body: JSON.stringify({ text }),
   });
 
   if (res.ok) console.log('   -> 슬랙 알림 발송 완료');
@@ -404,7 +555,10 @@ async function main() {
   if (!process.env.GOOGLE_SERVICE_ACCOUNT_JSON) throw new Error('GOOGLE_SERVICE_ACCOUNT_JSON 환경변수가 없습니다.');
 
   const sheets = getSheets();
-  await ensureSheets(sheets, [SNAPSHOT_SHEET, MISSING_SHEET]);
+  // [수정4] 설정된 시즌의 누적 탭도 없으면 만들기 (기존 탭은 그대로)
+  const seasonLogTabs = VIEWER_SEASONS.map((s) => seasonLogSheet(s.season));
+  await ensureSheets(sheets, [SNAPSHOT_SHEET, MISSING_SHEET, ...seasonLogTabs]);
+  for (const tab of seasonLogTabs) await ensureLogHeader(sheets, tab);
   const prevMap = await readSnapshot(sheets);
   const missingMap = await readMissing(sheets);
   console.log(`   -> 현재 추적 중인 사라진 상품 ${missingMap.size}개`);
@@ -412,17 +566,24 @@ async function main() {
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 
-  // ★ 다중 URL 처리: 26FALL과 26WINTER 모두 수집
+  // ★ 다중 URL 처리: VIEWER_SEASONS 에 적힌 시즌·태그를 모두 수집 ([수정4])
+  //   상품마다 어느 시즌 목록에서 찾았는지(season)를 같이 기억합니다.
   const productList = [];
-  for (const listingUrl of LISTING_URLS) {
-    const products = await getProductList(page, listingUrl);
-    productList.push(...products);
+  for (const { season, tags } of VIEWER_SEASONS) {
+    for (const tag of tags) {
+      const products = await getProductList(page, listingUrl(tag));
+      productList.push(...products.map((p) => ({ ...p, season })));
+    }
   }
 
-  // ★ 중복 제거 (같은 상품이 여러 태그에 있을 수 있음)
-  const uniqueProducts = Array.from(
-    new Map(productList.map((p) => [p.code, p])).values()
-  );
+  // ★ 중복 제거 (같은 상품이 여러 태그에 있을 수 있음 → 먼저 찾은 시즌 기준)
+  const uniqueProducts = [];
+  const seenCodes = new Set();
+  for (const p of productList) {
+    if (seenCodes.has(p.code)) continue;
+    seenCodes.add(p.code);
+    uniqueProducts.push(p);
+  }
   console.log(`   -> 총 ${uniqueProducts.length}개 상품 (중복 제거 후)\n`);
 
   if (!uniqueProducts.length) throw new Error('상품 목록 0개: 기존 스냅샷과 기록 보호를 위해 수집 중단');
@@ -433,7 +594,7 @@ async function main() {
   const all = [];
 
   for (let i = 0; i < uniqueProducts.length; i++) {
-    const { code, name } = uniqueProducts[i];
+    const { code, name, season } = uniqueProducts[i];
     const viewers = await checkViewer(page, code);
     const like = likeMap.has(code) ? likeMap.get(code) : null;
 
@@ -454,7 +615,7 @@ async function main() {
     console.log(`   (${i + 1}/${uniqueProducts.length}) ${code} ${name} -> ${viewers}명  ${likeLog}`);
 
     all.push({
-      code, name, viewers, like, prevLike, delta, todayBase, todayDelta,
+      code, name, season, viewers, like, prevLike, delta, todayBase, todayDelta,
       date: stamp.date, time: stamp.time, url: productUrl(code),
     });
   }
@@ -477,6 +638,7 @@ async function main() {
   // 새로 사라진 상품 (단, 수집이 덜 된 회차에서는 건너뜀)
   const prevCount = prevMap.size;
   const dropRatio = prevCount > 0 ? (prevCount - uniqueProducts.length) / prevCount : 0;
+  let guardTripped = false; // [수정13] 이번 회차가 "덜 수집된 회차"인지 기억
 
   if (prevCount === 0) {
     console.log('   [안내] 직전 기록이 없어 품절 판정은 다음 회차부터 합니다.');
@@ -485,6 +647,7 @@ async function main() {
       `   [주의] 상품 수가 직전 ${prevCount}개 → ${uniqueProducts.length}개로 크게 줄어` +
       ` 수집 실패로 보고 품절 판정을 건너뜁니다.`
     );
+    guardTripped = true;
   } else {
     const disappeared = Array.from(prevMap.entries()).filter(
       ([code]) => !currentCodes.has(code) && !missingMap.has(code)
@@ -525,16 +688,32 @@ async function main() {
   // 모든 정상 수집 상품의 30분 단위 기록을 누적. 알림 기준 50명은 별도로 적용.
   const hot = all.filter((p) => typeof p.viewers === 'number' && p.viewers >= VIEWER_THRESHOLD);
   const loggable = all.filter((p) => p.like !== null || p.viewers !== null);
-  const logRows = loggable.map((p) => [
+  const toRow = (p) => [
     p.code, p.name, p.date, p.time, p.viewers,
     p.like ?? '', p.delta ?? '', p.todayDelta ?? '',
-  ]);
+  ];
+  const logRows = loggable.map(toRow);
 
-  if (logRows.length > 0) await appendLog(sheets, logRows);
-  else console.log('   -> 정상 수집된 좋아요/보는 사람 수가 없어 기록을 건너뜁니다.');
+  // [수정4] 시즌별 탭에 나눠서 append (26FW 상품은 기존과 똑같이 26FW좋아요_현황으로)
+  if (logRows.length > 0) {
+    for (const { season } of VIEWER_SEASONS) {
+      const rows = loggable.filter((p) => p.season === season).map(toRow);
+      if (rows.length) await appendLog(sheets, rows, seasonLogSheet(season));
+    }
+  } else console.log('   -> 정상 수집된 좋아요/보는 사람 수가 없어 기록을 건너뜁니다.');
   console.log(`[진단] 좋아요 수집 ${all.filter(p => p.like !== null).length}개 / 기록 신규 ${logRows.length}행`);
 
-  if (all.some(p => p.like !== null)) await writeSnapshot(sheets, all);
+  // [수정13] 덜 수집된 회차에는 이번에 못 본 상품의 직전 값도 스냅샷에 그대로 남깁니다.
+  //   예전에는 못 본 상품이 스냅샷에서 지워져서, 다음 회차에 그 상품이 실제로 사라져도
+  //   "사라짐" 판정을 못 하고 '오늘 00시 좋아요' 기준값도 초기화됐습니다.
+  const carried = guardTripped
+    ? Array.from(prevMap.entries()).filter(([code]) => !currentCodes.has(code)).map(([code, p]) => ({
+      code, name: p.name, date: p.date, time: '', like: p.like, prevLike: null, delta: null,
+      todayBase: p.todayBase, todayDelta: null, viewers: null,
+    }))
+    : [];
+  if (carried.length) console.log(`   [안내] 덜 수집된 회차: 못 본 상품 ${carried.length}개의 직전 값을 스냅샷에 유지`);
+  if (all.some(p => p.like !== null)) await writeSnapshot(sheets, [...all, ...carried]);
   else console.warn('[경고] 좋아요 API 데이터 0개: 기존 좋아요 스냅샷 보존');
   await writeMissing(sheets, missingMap);
 
@@ -554,7 +733,9 @@ async function main() {
   if (needCheck.length > 0) console.log(`⚠️ 사유 확인 필요 ${needCheck.length}개`);
   if (returned.length > 0) console.log(`↩️ 다시 올라옴 ${returned.length}개`);
 
-  await sendSlackAlert({ hot, spikes, soldOut, needCheck, returned, stamp });
+  // [수정3] 상품등록 D열/시즌설정 읽기 (읽기만 하고 절대 쓰지 않음)
+  const watch = await readWatchStatus(sheets);
+  await sendSlackAlert({ hot, spikes, soldOut, needCheck, returned, stamp, watch });
 }
 
 // 실행 진입점은 파일 맨 아래의 통합 실행 관리자가 담당합니다.
@@ -596,7 +777,9 @@ const TZ='Asia/Seoul';
 const fmt=d=>new Intl.DateTimeFormat('sv-SE',{timeZone:TZ,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).format(d).replace(' ',' ');
 const hour=d=>Number(new Intl.DateTimeFormat('en-US',{timeZone:TZ,hour:'numeric',hourCycle:'h23'}).format(d));
 const kstParts=d=>{const p=Object.fromEntries(new Intl.DateTimeFormat('en-US',{timeZone:TZ,year:'numeric',month:'2-digit',day:'2-digit',weekday:'short',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(d).filter(x=>x.type!=='literal').map(x=>[x.type,x.value]));return {date:`${p.year}-${p.month}-${p.day}`,weekday:p.weekday,hour:Number(p.hour),minute:Number(p.minute)};};
-const alertAllowed=(d)=>{const p=kstParts(d);const min=p.hour*60+p.minute;return !['Sat','Sun'].includes(p.weekday)&&min>=STOCK_CONFIG.notifyStart*60&&min<STOCK_CONFIG.notifyEnd*60&&!(min>=STOCK_CONFIG.lunchStart*60&&min<STOCK_CONFIG.lunchEndHour*60+STOCK_CONFIG.lunchEndMinute);};
+// [수정1] 품절 알림 허용 시간은 파일 맨 위 isStockSlackTime() 하나로 통일 (좋아요 쪽과 같은 규칙)
+//   ※ 위 STOCK_CONFIG의 notifyStart 등 숫자는 이제 참고용입니다. 시간 변경은 맨 위 STOCK_SLACK_HOURS에서!
+const alertAllowed=(d)=>isStockSlackTime(d);
 const inHours=(h,a,b)=>a===b?false:(a<b?h>=a&&h<b:h>=a||h<b);
 const truth=v=>/^(예|y|yes|o|true|on|1)$/i.test(String(v||'').trim());
 const split=v=>String(v||'').split(',').map(x=>x.trim().toLowerCase()).filter(Boolean);
@@ -639,14 +822,17 @@ const regHeader=(await read(`'${NAMES.registry}'!A1:ZZ1`))[0]||[];
 if(REG_HEADER.some((h,i)=>regHeader[i]!==h))throw Error('상품등록 헤더 불일치: 자동 이전하지 않고 중단합니다.');
 const seasonRows=await read(`'${NAMES.seasons}'!A2:C`);
 const seasonMap=new Map(seasonRows.filter(r=>SEASON_RE.test(String(r[0]||'').trim())).map(r=>[String(r[0]).trim(),truth(r[1])]));
-const suggested=['26FW']; // 새 시즌은 26FW만 추가; 기존 시즌설정 행은 삭제하지 않음
+// 상품등록에 등장한 모든 시즌을 자동 발견. 새 시즌은 반드시 OFF로 시작한다.
+const registeredSeasonNames=[...new Set((await read(`'${NAMES.registry}'!A2:A`)).map(r=>String(r[0]||'').trim().toUpperCase()).filter(x=>SEASON_RE.test(x)))];
+const suggested=registeredSeasonNames;
 const newSeasons=suggested.filter(x=>!seasonMap.has(x)).map(x=>[x,'OFF','필요한 시즌만 ON으로 변경']);
 if(newSeasons.length){await put(`'${NAMES.seasons}'!A${seasonRows.length+2}`,newSeasons);for(const r of newSeasons)seasonMap.set(r[0],false);}
 const ownerRows=await read(`'${NAMES.owners}'!A2:C`);
 const memberId=/^[UW][A-Z0-9]{6,}$/;
 const activeOwners=ownerRows.filter(r=>r[0]&&!['OFF','FALSE','아니오','0'].includes(String(r[2]||'ON').trim().toUpperCase()));
 const ownerMentions=()=>activeOwners.map(r=>memberId.test(String(r[1]||''))?`<@${r[1]}>`:esc(r[0])).join(' ');
-const now=new Date(),stamp=fmt(now),kst=kstParts(now);
+const now=currentTime(),stamp=fmt(now),kst=kstParts(now); // [수정1] 테스트 시각(TEST_NOW) 지원
+console.log(`[진단] 품절 알림 시간 판정: ${alertAllowed(now)?'보냄 가능':'보내지 않음(대기열 저장)'} (${stamp} ${kst.weekday})`);
 const changeOpen=alertAllowed(now);
 const remindOpen=false; // 일반 재알림은 비활성화, 15시 긴급 점검만 사용
 const remindMs=Infinity;
@@ -682,8 +868,9 @@ const rows=await read(`'${NAMES.registry}'!A2:ZZ`);
 const stateRows=await read(`'${NAMES.state}'!A2:D`);
 const state=new Map(stateRows.filter(r=>r[0]).map(r=>[String(r[0]),{old:safeJSON(r[1]),cache:safeJSON(r[2])}]));
 const productRows=rows.map((r,i)=>({index:i,season:String(r[0]||'').trim().toUpperCase(),goodsNo:/^\d{5,}$/.test(String(r[1]||'').trim())?String(r[1]).trim():null,enteredName:String(r[2]||'').trim(),enabled:r[3]===true||truth(r[3]),raw:r}));
-const allSeasons=['26FW']; // 다른 시즌 탭을 새로 만들지 않음
-const seasonTitles=['26FW'];
+// ON 시즌은 대시보드 생성 및 감시, OFF 시즌은 기존 탭과 기록을 그대로 보존.
+const allSeasons=[...new Set(productRows.map(r=>r.season).filter(x=>SEASON_RE.test(x)&&seasonMap.get(x)===true))];
+const seasonTitles=allSeasons.flatMap(x=>[x,`${x}좋아요_현황`]);
 const toCreate=seasonTitles.filter(x=>!byName.has(x));
 if(toCreate.length){const added=await sheets.spreadsheets.batchUpdate({spreadsheetId:ID,requestBody:{requests:toCreate.map(title=>({addSheet:{properties:{title}}}))}});for(const r of added.data.replies)byName.set(r.addSheet.properties.title,r.addSheet.properties.sheetId);}
 // 26FW의 기존 O:AZ는 이전 테스트 컬럼. 첫 실행에 별도 탭에 백업하고 O열만 새 용도로 전환.
@@ -725,7 +912,7 @@ await ensureHeader(NAMES.history,['시각','시즌','종류','상품번호','상
 // 옵션별 체크는 기본 TRUE로 초기화하고, 사용자가 해제하면 이후 자동 실행에서 유지한다.
 let optionHeaders=(await read(`'${NAMES.registry}'!F1:ZZ1`))[0]||[];
 const optionColumn=new Map(optionHeaders.map((v,i)=>[String(v),OPTION_START+i]).filter(x=>x[0]));
-const candidate=productRows.filter(r=>r.goodsNo&&r.enabled&&r.season==='26FW'&&seasonMap.get('26FW')===true); // 감시 OFF 대량 이관 상품은 API 조회하지 않음
+const candidate=productRows.filter(r=>r.goodsNo&&r.enabled&&seasonMap.get(r.season)===true); // 감시 OFF 대량 이관 상품은 API 조회하지 않음
 console.log('[진단] 시즌설정 26FW:', JSON.stringify({value:seasonMap.get('26FW'),raw:seasonRows.find(r=>String(r[0]).trim()==='26FW')}));
 console.log('[진단] 상품등록:', JSON.stringify({total:productRows.length, validNumbers:productRows.filter(r=>r.goodsNo).length, checked:productRows.filter(r=>r.enabled).length, checked26FW:productRows.filter(r=>r.enabled&&r.season==='26FW').length, candidates:candidate.length}));
 console.log('[진단] 6885281:', JSON.stringify(productRows.find(r=>r.goodsNo==='6885281')||{message:'상품등록에서 번호를 찾지 못함'}));
@@ -763,8 +950,13 @@ for(let i=0;i<newSeasons.length;i++)optionCellWrites.push({range:`'${NAMES.seaso
 for(const r of candidate){const cur=fetched.get(r.goodsNo);if(!cur||cur.error||cur.status==='GONE')continue;
   for(const [opt,idx] of optionColumn){
     if(opt in (cur.sizes||{}))continue;
-    checkboxRequests.push({setDataValidation:{range:{sheetId:byName.get(NAMES.registry),startRowIndex:r.index+1,endRowIndex:r.index+2,startColumnIndex:idx,endColumnIndex:idx+1}}});
-    if(r.raw[idx]!==undefined&&r.raw[idx]!=='')optionCellWrites.push({range:`'${NAMES.registry}'!${(function(n){let o='';for(n++;n;n=Math.floor((n-1)/26))o=String.fromCharCode(65+(n-1)%26)+o;return o;})(idx)}${r.index+2}`,values:[['']]});
+    // [수정11] 이 상품에 지금 없는 옵션 칸:
+    //   예전에는 칸에 값(체크 해제 FALSE 등)이 있으면 지워버렸습니다.
+    //   → 무신사 API가 잠깐 옵션을 빼먹으면 사용자가 해제한 체크가 사라지고,
+    //     옵션이 돌아오면 다시 TRUE(체크)로 되살아나는 문제가 있었습니다.
+    //   이제는 "빈 칸"일 때만 체크박스 모양을 없애고, 값이 있는 칸은 절대 건드리지 않습니다.
+    const cellValue=r.raw[idx];
+    if(cellValue===undefined||cellValue==='')checkboxRequests.push({setDataValidation:{range:{sheetId:byName.get(NAMES.registry),startRowIndex:r.index+1,endRowIndex:r.index+2,startColumnIndex:idx,endColumnIndex:idx+1}}});
   }
   for(const opt of Object.keys(cur.sizes||{})){
     const idx=optionColumn.get(opt);const prev=r.raw[idx];
@@ -777,16 +969,41 @@ for(let i=0;i<checkboxRequests.length;i+=100)await sheets.spreadsheets.batchUpda
 for(let i=0;i<optionCellWrites.length;i+=100)await sheets.spreadsheets.values.batchUpdate({spreadsheetId:ID,requestBody:{valueInputOption:'RAW',data:optionCellWrites.slice(i,i+100)}});
 // 시즌 OFF 또는 상품 OFF면 감시 중단. 사이즈는 실제 옵션 중 체크된 항목만 감시.
 for(const r of productRows){const cur=fetched.get(r.goodsNo);r.w={only:[],skip:[]};if(cur&&!cur.error){for(const opt of Object.keys(cur.sizes||{})){const idx=optionColumn.get(opt);const v=r.raw[idx];if(v===false||String(v).toUpperCase()==='FALSE')r.w.skip.push(opt.toLowerCase());else r.w.only.push(opt.toLowerCase());}if(Object.keys(cur.sizes||{}).length&&!r.w.only.length)r.w.only=['__NO_OPTIONS_SELECTED__'];}}
-const grouped=new Map();for(const r of productRows){if(r.goodsNo&&r.enabled&&r.season==='26FW'&&seasonMap.get(r.season)===true){if(!grouped.has(r.goodsNo))grouped.set(r.goodsNo,[]);grouped.get(r.goodsNo).push(r);}}
-const alerts=[],reminders=[],urgents=[],urgentGoods=[],logs=[],seasonLogs=new Map();let pending=(await read(`'${NAMES.pending}'!A2:C`)).filter(r=>r[1]&&r[2]).map(r=>({g:String(r[1]),line:String(r[2])}));const nextState=new Map(state);
+const grouped=new Map();for(const r of productRows){if(r.goodsNo&&r.enabled&&seasonMap.get(r.season)===true){if(!grouped.has(r.goodsNo))grouped.set(r.goodsNo,[]);grouped.get(r.goodsNo).push(r);}}
+const alerts=[],reminders=[],urgents=[],urgentGoods=[],logs=[],seasonLogs=new Map();
+// 대기알림 읽기: t=처음 쌓인 시각, g=상품번호, line=보낼 문장
+let pending=(await read(`'${NAMES.pending}'!A2:C`)).filter(r=>r[1]&&r[2]).map(r=>({t:String(r[0]||stamp),g:String(r[1]),line:String(r[2])}));
+const nextState=new Map(state);
+// ─────────────────────────────────────────────────────────
+// [수정5] 감시 OFF(상품등록 D열 해제) 또는 시즌 OFF 상품의 대기알림은 큐에서 뺍니다.
+//   grouped = 지금 "감시 ON + 시즌 ON" 인 상품들만 모아 둔 지도입니다.
+//   예전에는 이 확인이 없어서, 주말에 쌓인 메시지가 D열을 꺼도 월요일에 발송됐습니다.
+//   뺀 메시지는 품절_알림기록에 '대기알림 취소' 로 한 줄 남겨 기록은 보존합니다.
+//   (매 실행마다 확인하므로, 토요일에 OFF로 바꾸면 그 즉시 큐에서 사라집니다.)
+// ─────────────────────────────────────────────────────────
+{
+  const keep=[],dropped=[];
+  for(const p of pending)(grouped.has(p.g)?keep:dropped).push(p);
+  for(const p of dropped)logs.push([stamp,'대기알림 취소(감시 OFF)',p.g,p.line.slice(0,300),url(p.g)]);
+  if(dropped.length)console.log(`[대기알림] 감시 OFF/시즌 OFF 상품 ${dropped.length}건을 발송 대기열에서 제외: ${[...new Set(dropped.map(p=>p.g))].join(', ')}`);
+  pending=keep;
+}
+// [수정9] 감시를 끈 상품의 이전 상태에 "멈춘 시각(pausedAt)" 표시만 남깁니다. (삭제하지 않음)
+//   나중에 다시 ON 하면, 꺼져 있던 동안의 변화를 한꺼번에 알리지 않고
+//   그 시점 상태를 새 기준으로 다시 잡습니다. (미해결 문제는 15시 점검에서 다시 잡힘)
+for(const [g,v] of state){
+  if(!grouped.has(g)&&v&&v.old&&!v.old.pausedAt)nextState.set(g,{old:{...v.old,pausedAt:now.getTime()},cache:v.cache});
+}
 for(const [g,group] of grouped){const stored=state.get(g)||{};const cur=fetched.get(g)||await getProduct(g,stored.cache);if(cur.error){console.warn(`상품 ${g} 조회 실패: ${cur.error}`);for(const r of group)r.out=[stored.old?.name||'',`❓ 확인 실패 (${cur.error})`,'','','','',stamp];continue;}
 const old=stored.old;
+const resumed=!!old?.pausedAt; // [수정9] OFF였다가 이번에 다시 ON 된 상품인가?
+if(resumed){console.log(`[감시 재개] ${g}: 꺼져 있던 동안의 변화는 알리지 않고 지금 상태를 새 기준으로 저장`);logs.push([stamp,'감시 재개(기준 재설정)',old.name||g,'OFF 기간 변화는 알림 생략',url(g)]);}
 // 단발성 404는 삭제로 확정하지 않는다. 2회 연속 404일 때만 확정.
 if(cur.status==='GONE'&&old?.status!=='GONE'&&(old?.goneCount||0)<1){const pendingOld={...old,goneCount:(old?.goneCount||0)+1};nextState.set(g,{old:pendingOld,cache:stored.cache});for(const r of group)r.out=[old?.name||'','❓ 삭제 여부 재확인 중','','','','',stamp];continue;}
-const merged={name:cur.status==='GONE'&&old?old.name:(cur.name||group[0].enteredName||g),status:cur.status,sizes:(cur.status==='GONE'&&old?old.sizes:cur.sizes)||{},issueSince:old?.issueSince||null,lastAlert:old?.lastAlert||null,goneCount:cur.status==='GONE'?(old?.goneCount||0)+1:0,lastUrgentDate:old?.lastUrgentDate||null};const watch={only:[],skip:[]}; // All monitored rows contribute; each row retains its own filtering.
+const merged={name:cur.status==='GONE'&&old?old.name:(cur.name||group[0].enteredName||g),status:cur.status,sizes:(cur.status==='GONE'&&old?old.sizes:cur.sizes)||{},issueSince:resumed?null:(old?.issueSince||null),lastAlert:resumed?null:(old?.lastAlert||null),goneCount:cur.status==='GONE'?(old?.goneCount||0)+1:0,lastUrgentDate:old?.lastUrgentDate||null};const watch={only:[],skip:[]}; // All monitored rows contribute; each row retains its own filtering.
 const issues=group.map(r=>issue(merged,r.w,STOCK_CONFIG.sizeRemind)).filter(Boolean);const hasIssue=issues.length>0;if(!hasIssue){merged.issueSince=null;merged.lastAlert=null;}else if(!merged.issueSince)merged.issueSince=now.getTime();
-const messages=old?[...new Set(group.flatMap(r=>diff(old,merged,r.w,STOCK_CONFIG.restockAlert)))]:[];const who=ownerMentions();const line=(message)=>`• <${url(g)}|${esc(merged.name)}> — ${message}${who?' '+who:''}`;
-if(messages.length){const message=messages.join(' · ');const item=line(message);if(changeOpen){alerts.push(item);if(hasIssue)merged.lastAlert=now.getTime();}else{pending.push({g,line:`• [${new Intl.DateTimeFormat('en-GB',{timeZone:TZ,hour:'2-digit',minute:'2-digit'}).format(now)}] ${item.slice(2)}`});}logs.push([stamp,changeOpen?'변동':'변동(시간 외)',merged.name,message,url(g)]);for(const r of group){if(!seasonLogs.has(r.season))seasonLogs.set(r.season,[]);seasonLogs.get(r.season).push([stamp,changeOpen?'변동':'변동(시간 외)',g,merged.name,message,url(g),'']);}}
+const messages=(old&&!resumed)?[...new Set(group.flatMap(r=>diff(old,merged,r.w,STOCK_CONFIG.restockAlert)))]:[];const who=ownerMentions();const line=(message)=>`• <${url(g)}|${esc(merged.name)}> — ${message}${who?' '+who:''}`;
+if(messages.length){const message=messages.join(' · ');const item=line(message);if(changeOpen){alerts.push(item);if(hasIssue)merged.lastAlert=now.getTime();}else{pending.push({t:stamp,g,line:`• [${stamp.slice(5)}] ${item.slice(2)}`});/* [수정7] 월요일에 받아도 언제 일인지 알도록 날짜 포함 */}logs.push([stamp,changeOpen?'변동':'변동(시간 외)',merged.name,message,url(g)]);for(const r of group){if(!seasonLogs.has(r.season))seasonLogs.set(r.season,[]);seasonLogs.get(r.season).push([stamp,changeOpen?'변동':'변동(시간 외)',g,merged.name,message,url(g),'']);}}
 if(hasIssue&&remindOpen&&(!merged.lastAlert||now.getTime()-merged.lastAlert>=remindMs)&&!(changeOpen&&pending.some(p=>p.g===g))){const hours=Math.floor((now.getTime()-merged.issueSince)/3600000);const msg=[...new Set(issues)].join(' · ')+(hours>=1?` (${hours}시간째 미해결)`:'');reminders.push(line(msg));logs.push([stamp,'재알림',merged.name,msg,url(g)]);for(const r of group){if(!seasonLogs.has(r.season))seasonLogs.set(r.season,[]);seasonLogs.get(r.season).push([stamp,'재알림',g,merged.name,msg,url(g),'']);}merged.lastAlert=now.getTime();}
 // 15:00 KST 최종 점검: 감시 ON + 시즌 ON + 미해결 상태만, 상품별 하루 한 번.
 if(urgentOpen&&hasIssue&&merged.lastUrgentDate!==kst.date){
@@ -812,18 +1029,24 @@ for(const season of allSeasons){
   const previousIndex=new Map();
   previous.forEach((r,i)=>{const g=String(r[0]||'').trim();if(g&&!previousIndex.has(g))previousIndex.set(g,i);});
   const updates=[];
-  const registered=new Map(productRows.filter(r=>r.season==='26FW'&&r.goodsNo).map(r=>[r.goodsNo,r]));
+  const registered=new Map(productRows.filter(r=>r.season===season&&r.goodsNo).map(r=>[r.goodsNo,r]));
   const codes=[...new Set([...previousIndex.keys(),...registered.keys()])].filter(g=>/^\d{5,}$/.test(g));
   for(const goodsNo of codes){
     const r=registered.get(goodsNo);
     const cur=nextState.get(goodsNo)?.old||fetched.get(goodsNo);
-    const isActive=!!r&&seasonMap.get('26FW')===true&&r.enabled;
+    const isActive=!!r&&seasonMap.get(season)===true&&r.enabled;
     const keys=cur&&r?Object.keys(cur.sizes||{}).filter(k=>watched(r.w,k)):[];
     const sold=cur&&cur.status!=='GONE'?keys.filter(k=>!cur.sizes[k]):[];
     const available=cur&&cur.status!=='GONE'?keys.filter(k=>cur.sizes[k]):[];
     const prior=previousIndex.has(goodsNo)?previous[previousIndex.get(goodsNo)]:[];
-    const status=!r?'미등록 (기존 데이터)':!seasonMap.get('26FW')?'⏸ 시즌 OFF':!r.enabled?'⏸ 감시 OFF':!cur||cur.error?'대기 / 조회 실패':cur.status==='SALE'&&sold.length?'사이즈 품절':ko[cur.status]||cur.status;
-    const v=[goodsNo,cur?.name||r?.enteredName||prior[1]||'',isActive?'ON':'OFF',status,sold.join(', ')||prior[4]||'',available.join(', ')||prior[5]||'',cur?.issueSince?fmt(new Date(cur.issueSince)):prior[6]||'',cur?.lastAlert?fmt(new Date(cur.lastAlert)):prior[7]||'',isActive?stamp:prior[8]||'',...(function(){const l=latestLikes.get(goodsNo);if(!l)return [prior[9]??'',prior[10]??'',prior[11]??'',prior[12]??'',prior[13]??''];latestUpdated++;return [l[4]??prior[9]??'',l[5]??prior[10]??'',l[6]??prior[11]??'',l[8]??prior[12]??'',l[9]??prior[13]??''];})(),(function(){const l=latestLikes.get(goodsNo);return l?(String(l[2]||'')+' '+String(l[3]||'')).trim():prior[14]??'';})()];
+    const status=!r?'미등록 (기존 데이터)':!seasonMap.get(season)?'⏸ 시즌 OFF':!r.enabled?'⏸ 감시 OFF':!cur||cur.error?'대기 / 조회 실패':cur.status==='SALE'&&sold.length?'사이즈 품절':ko[cur.status]||cur.status;
+    // [수정10] 감시 ON이고 이번에 조회 성공한 상품은 "지금 값"을 그대로 씁니다. (비어 있어도!)
+    //   예전 코드는 값이 비면 이전 값(prior)으로 채워서, 재입고되어 품절 옵션이 없어져도
+    //   E열 '품절 옵션'과 G열 '문제 발생 시각'이 옛날 값으로 계속 남아 있었습니다.
+    //   감시 OFF/조회 실패 상품은 예전처럼 마지막으로 알던 값을 유지합니다.
+    const fresh=isActive&&!!cur&&!cur.error;
+    const keepOr=(nowVal,priorVal)=>fresh?nowVal:(nowVal||priorVal||'');
+    const v=[goodsNo,cur?.name||r?.enteredName||prior[1]||'',isActive?'ON':'OFF',status,keepOr(sold.join(', '),prior[4]),keepOr(available.join(', '),prior[5]),keepOr(cur?.issueSince?fmt(new Date(cur.issueSince)):'',prior[6]),keepOr(cur?.lastAlert?fmt(new Date(cur.lastAlert)):'',prior[7]),isActive?stamp:prior[8]||'',...(function(){const l=latestLikes.get(goodsNo);if(!l)return [prior[9]??'',prior[10]??'',prior[11]??'',prior[12]??'',prior[13]??''];latestUpdated++;return [l[4]??prior[9]??'',l[5]??prior[10]??'',l[6]??prior[11]??'',l[8]??prior[12]??'',l[9]??prior[13]??''];})(),(function(){const l=latestLikes.get(goodsNo);return l?(String(l[2]||'')+' '+String(l[3]||'')).trim():prior[14]??'';})()];
     if(previousIndex.has(goodsNo))updates.push({row:previousIndex.get(goodsNo)+2,v});
     else {const row=previous.length+2;previousIndex.set(goodsNo,previous.length);previous.push(v);updates.push({row,v});}
   }
@@ -831,23 +1054,47 @@ for(const season of allSeasons){
     const data=updates.slice(i,i+100).map(u=>({range:`'${title}'!A${u.row}:O${u.row}`,values:[u.v]}));
     await sheets.spreadsheets.values.batchUpdate({spreadsheetId:ID,requestBody:{valueInputOption:'RAW',data}});
   }
-  console.log(`26FW 품절 현황: 기존 행 보존, ${updates.length}개 상품 연결/갱신, 좋아요 최신값 ${latestUpdated}개 갱신`);
+  console.log(`${season} 품절 현황: 기존 행 보존, ${updates.length}개 상품 연결/갱신, 좋아요 최신값 ${latestUpdated}개 갱신`);
 }
 // Keep prior rows for excluded products, remove rows for deleted products only.
 // 상태 저장은 Slack 긴급 알림 전송 결과를 반영한 후 수행한다.
-const webhook=process.env.SLACK_WEBHOOK_STOCK||process.env.SLACK_WEBHOOK_URL||'';async function send(title,lines){if(!lines.length)return true;if(!webhook){console.warn('Slack Webhook 없음: 알림 미발송');return false;}for(let i=0;i<lines.length;i+=30){const res=await fetch(webhook,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:(i===0?title+'\n':'')+lines.slice(i,i+30).join('\n'),unfurl_links:false})});if(!res.ok){console.error(`Slack 오류 HTTP ${res.status}`);return false;}}return true;}
-let delivered=[];if(changeOpen&&pending.length){const held=pending.slice(0,30).map(x=>x.line);if(pending.length>30)held.push(`…외 ${pending.length-30}건`);if(await send(`🌙 *알림 시간 외 변동* (${pending.length}건)`,held)){delivered=pending;pending=[];}}
+const webhook=process.env.SLACK_WEBHOOK_STOCK||process.env.SLACK_WEBHOOK_URL||'';
+// 품절 슬랙 보내기. 30줄씩 나눠서 보냄. 성공하면 true.
+async function send(title,lines){
+  if(!lines.length)return true;
+  // [수정12] 마지막 안전장치: 어떤 경로로 호출되든 품절 허용 시간이 아니면 절대 보내지 않음.
+  //   false를 돌려주면 대기열(pending)은 지워지지 않고 다음 평일 업무시간까지 남습니다.
+  if(!alertAllowed(currentTime())){console.warn(`[차단] 품절 알림 시간 아님 → 미발송: ${title}`);return false;}
+  if(DRY_RUN){console.log(`[DRY-RUN] 품절 채널로 보냈을 메시지:\n${title}\n${lines.join('\n')}\n${runFooter()}`);return true;}
+  if(!webhook){console.warn('Slack Webhook 없음: 알림 미발송');return false;}
+  for(let i=0;i<lines.length;i+=30){
+    const isLast=i+30>=lines.length;
+    // [수정2] 마지막 조각 끝에 "누가 보냈는지" 한 줄
+    const text=(i===0?title+'\n':'')+lines.slice(i,i+30).join('\n')+(isLast?'\n'+runFooter():'');
+    const res=await fetch(webhook,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,unfurl_links:false})});
+    if(!res.ok){console.error(`Slack 오류 HTTP ${res.status}`);return false;}
+  }
+  return true;
+}
+// [수정6] 대기알림은 30건만 보내고 나머지를 "…외 N건"으로 버리던 것을 → 전부 보냄
+//   (send()가 30줄씩 나눠 여러 메시지로 보내줍니다)
+let delivered=[];if(changeOpen&&pending.length){const held=pending.map(x=>x.line);if(await send(`🌙 *알림 시간 외 변동* (${pending.length}건)`,held)){delivered=pending;pending=[];}}
 await send(`🔔 *무신사 상품 변동* (${alerts.length}건)`,alerts);await send(`⏰ *아직 해결 안 된 상품* (${reminders.length}건)`,reminders);
 const urgentDelivered=await send(`🚨 *15:00 MD 승인/조치 최종 확인* (${urgents.length}건)`,urgents);
 if(urgentDelivered&&urgents.length){for(const g of urgentGoods){const item=nextState.get(g);if(item?.old)item.old.lastUrgentDate=kst.date;}
   const urgentLog=urgentGoods.map(g=>[stamp,'15시 긴급 점검',nextState.get(g)?.old?.name||g,'미해결 상태 MD 확인 요청',url(g)]);logs.push(...urgentLog);
-  for(const g of urgentGoods){seasonLogs.set('26FW',[...(seasonLogs.get('26FW')||[]),[stamp,'15시 긴급 점검',g,nextState.get(g)?.old?.name||g,'미해결 상태 MD 확인 요청',url(g),'']]);}
+  for(const g of urgentGoods){for(const season of new Set(grouped.get(g)?.map(r=>r.season)||[]))seasonLogs.set(season,[...(seasonLogs.get(season)||[]),[stamp,'15시 긴급 점검',g,nextState.get(g)?.old?.name||g,'미해결 상태 MD 확인 요청',url(g),'']]);}
 }
-const all=Array.from(nextState.entries()).map(([g,v])=>[g,JSON.stringify(v.old||null),JSON.stringify(v.cache||null),stamp]);await sheets.spreadsheets.values.clear({spreadsheetId:ID,range:`'${NAMES.state}'!A2:D`});if(all.length)await put(`'${NAMES.state}'!A2`,all);
+// [수정8] 상태/대기알림 저장: "먼저 새 값 쓰기 → 남는 아래 줄만 지우기" (중간 실패해도 탭이 텅 비지 않음)
+const safeRewrite=async(name,lastCol,values)=>{if(values.length)await put(`'${name}'!A2`,values);await sheets.spreadsheets.values.clear({spreadsheetId:ID,range:`'${name}'!A${values.length+2}:${lastCol}`});};
+const all=Array.from(nextState.entries()).map(([g,v])=>[g,JSON.stringify(v.old||null),JSON.stringify(v.cache||null),stamp]);
+await safeRewrite(NAMES.state,'D',all);
 // 대기 알림은 별도 탭에 저장 (기존 품절_설정 탭은 읽거나 수정하지 않는다).
-await sheets.spreadsheets.values.clear({spreadsheetId:ID,range:`'${NAMES.pending}'!A2:C`});
-if(pending.length)await put(`'${NAMES.pending}'!A2`,pending.slice(-100).map(p=>[stamp,p.g,p.line]));
-for(const [season,entries] of seasonLogs){if(entries.length&&season==='26FW')await sheets.spreadsheets.values.append({spreadsheetId:ID,range:`'${NAMES.history}'!A:G`,valueInputOption:'RAW',insertDataOption:'INSERT_ROWS',requestBody:{values:entries.map(x=>[x[0],season,x[1],x[2],x[3],x[4],x[5]])}});}
+// [수정7] 최대 100건 → 500건. 넘치면 오래된 것부터 빠지며 로그에 경고. (변동 내용 자체는 품절_알림기록에 이미 남아 있음)
+const PENDING_MAX=500;
+if(pending.length>PENDING_MAX)console.warn(`[대기알림] ${pending.length}건 중 오래된 ${pending.length-PENDING_MAX}건은 슬랙 대기열에서 빠집니다 (품절_알림기록에는 남아 있음)`);
+await safeRewrite(NAMES.pending,'C',pending.slice(-PENDING_MAX).map(p=>[p.t||stamp,p.g,p.line]));
+for(const [season,entries] of seasonLogs){if(entries.length)await sheets.spreadsheets.values.append({spreadsheetId:ID,range:`'${NAMES.history}'!A:G`,valueInputOption:'RAW',insertDataOption:'INSERT_ROWS',requestBody:{values:entries.map(x=>[x[0],season,x[1],x[2],x[3],x[4],x[5]])}});}
 if(logs.length)await sheets.spreadsheets.values.append({spreadsheetId:ID,range:`'${NAMES.log}'!A:E`,valueInputOption:'RAW',insertDataOption:'INSERT_ROWS',requestBody:{values:logs}});
 console.log(`품절 모니터링 완료: ${grouped.size}개 상품, 변동 ${alerts.length}건, 재알림 ${reminders.length}건, 대기 ${pending.length}건`);
 }
@@ -883,10 +1130,14 @@ async function ensureViewerHistoryTab() {
 
 async function runIntegrated() {
   const mode = (process.env.MONITOR_MODE || 'auto').toLowerCase();
-  const minute = new Date().getUTCMinutes();
-  const doViewer = mode === 'both' || mode === 'viewer' || (mode === 'auto' && minute % 30 < 10);
-  const doStock = mode === 'both' || mode === 'stock' || (mode === 'auto' && minute % 30 < 10);
+  const doViewer = mode === 'both' || mode === 'viewer' || mode === 'auto';
+  const doStock = mode === 'both' || mode === 'stock' || mode === 'auto';
   const errors = [];
+  // [수정2] 실행 정보를 로그 맨 위에 출력 (Actions 로그에서 바로 확인 가능)
+  console.log(`[실행정보] 워크플로=${RUN_INFO.workflow} 이벤트=${RUN_INFO.event} mode=${mode} ` +
+    `(viewer=${doViewer}, stock=${doStock}) 커밋=${RUN_INFO.sha} run=${RUN_INFO.runId}` +
+    `${DRY_RUN ? ' [DRY-RUN: 슬랙 실제 발송 안 함]' : ''}${TEST_NOW ? ` [TEST_NOW=${process.env.TEST_NOW}]` : ''}`);
+  console.log(`[실행정보] 지금 품절 슬랙 허용 시간인가? ${isStockSlackTime() ? '예' : '아니오 (좋아요/시청자 알림만 발송)'}`);
   if (doViewer || doStock) await ensureViewerHistoryTab();
   if (doViewer) {
     try { await main(); } catch (e) { console.error('[시청자 모니터링 실패]', e); errors.push(e); }
