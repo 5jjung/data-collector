@@ -320,7 +320,27 @@ async function appendLog(sheets, rows) {
 // ─────────────────────────────────────────────────────────
 // 4. 슬랙 알림
 // ─────────────────────────────────────────────────────────
+// 품절 관련 Slack 알림은 한국시간 평일 09:00~12:00, 13:30~18:00에만 허용.
+// 좋아요/실시간 시청자 알림은 기존처럼 24시간 유지.
+function viewerStockSlackAllowed(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Seoul', weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
+  }).formatToParts(date);
+  const get = (type) => parts.find((p) => p.type === type)?.value;
+  if (['Sat', 'Sun'].includes(get('weekday'))) return false;
+  const minutes = Number(get('hour')) * 60 + Number(get('minute'));
+  return minutes >= 9 * 60 && minutes < 18 * 60 &&
+    !(minutes >= 12 * 60 && minutes < 13 * 60 + 30);
+}
+
 async function sendSlackAlert({ hot, spikes, soldOut, needCheck, returned, stamp }) {
+  // 품절 추적/기록은 유지하되 업무시간 외 Slack 메시지만 제외.
+  if (!viewerStockSlackAllowed()) {
+    soldOut = [];
+    needCheck = [];
+    returned = [];
+    console.log('[슬랙] 업무시간 외: 좋아요/시청자 알림만 발송 (품절 알림 제외)');
+  }
   const webhookUrl = process.env.SLACK_WEBHOOK_URL;
   if (!webhookUrl) {
     console.log('   [안내] SLACK_WEBHOOK_URL이 없어서 슬랙 알림은 건너뜁니다.');
