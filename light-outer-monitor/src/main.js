@@ -10,7 +10,8 @@
 //   4) [좋아요] 좋아요 API 조회                  → src/likes.js
 //   5) [판정]  아우터 여부 최종 판정 (카테고리 002)
 //   6) [저장]  누적 CSV (하루 1파일) → 구글 드라이브 → src/storage/csvWriter.js, googleDrive.js
-//   7) [로그]  성공/실패 건수, 실패 원인, 누락 항목 요약
+//   7) [알림]  문제가 새로 생기거나 복구되면 슬랙 알림 → src/notify.js
+//   8) [로그]  성공/실패 건수, 실패 원인, 누락 항목 요약
 // ============================================================
 
 const fs = require('fs');
@@ -27,6 +28,7 @@ const { stats, log, warn, fail, failureSummary } = require('./logger');
 const { elapsedSec } = require('./utils');
 const csv = require('./storage/csvWriter');
 const drive = require('./storage/googleDrive');
+const { notifyIfNeeded } = require('./notify');
 
 const LOG_HEADERS = [
   '수집슬롯_KST', '시작_KST', '종료_KST', '소요초', '상태',
@@ -122,6 +124,7 @@ async function main() {
     }
   }
 
+  const prevLogRow = csv.lastLogRow(slot); // 직전 회차 결과 (실패 알림 중복 방지용)
   const savedFiles = []; // 드라이브에 올릴 실제 파일 (컬럼 변경 시 _v2 등)
   try {
     const saved = csv.appendDaily(slot, HEADERS, rows);
@@ -160,7 +163,10 @@ async function main() {
     }
   }
 
-  // 7) 요약
+  // 7) 슬랙: 문제가 새로 생겼거나 복구됐을 때만 알림
+  await notifyIfNeeded(prevLogRow, Object.fromEntries(LOG_HEADERS.map((h, i) => [h, logRow[i]])));
+
+  // 8) 요약
   log('===== 수집 요약 =====');
   LOG_HEADERS.forEach((h, i) => log(`   ${h}: ${logRow[i]}`));
   writeGithubSummary(LOG_HEADERS, logRow, records);

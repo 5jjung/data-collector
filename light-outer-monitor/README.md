@@ -26,10 +26,14 @@ light-outer-monitor/
 │  │  ├─ csvWriter.js      CSV 누적 (하루 1파일, 중복 방지)
 │  │  └─ googleDrive.js    구글 드라이브 업로드 (받기 → 이어붙이기 → 올리기)
 │  ├─ browser.js / time.js / logger.js / utils.js   공통 유틸
+│  ├─ notify.js            수집 문제 발생/복구 슬랙 알림
+│  ├─ dailyReport.js       하루 1번 슬랙 요약
+│  ├─ slack.js             슬랙 전송
 │  └─ probe.js             페이지 구조 진단 도구
 └─ test/                   파서/필터/CSV 단위 테스트 (npm test)
 
 .github/workflows/light-outer-monitor.yml   30분 자동 실행
+.github/workflows/light-outer-daily.yml     하루 1번 슬랙 요약 (23:55 KST)
 ```
 
 ---
@@ -93,18 +97,33 @@ light-outer-monitor/
 > 대안: 폴더를 **공유 드라이브**로 옮기고 기존 서비스계정 이메일을 "콘텐츠 관리자"로 추가하면
 > 위 설정 없이 기존 `GOOGLE_SERVICE_ACCOUNT_JSON` 으로 저장됩니다.
 
-### 3-2. (선택) Variables
+### 3-2. 슬랙 알림 (선택)
+
+1. 슬랙에서 경량 아우터 전용 채널 생성 (예: `#무신사-경량아우터`)
+2. https://api.slack.com/apps → **Create New App** → From scratch → 워크스페이스 선택
+3. **Incoming Webhooks** → On → **Add New Webhook to Workspace** → 1번 채널 선택 → 웹후크 주소(`https://hooks.slack.com/services/...`) 복사
+4. GitHub Secrets 에 `SLACK_WEBHOOK_LIGHT_OUTER` 로 저장
+
+| 알림 | 언제 | 코드 |
+|---|---|---|
+| 🚨 수집 문제 | 실패/누락/랭킹 부족이 **새로 생긴 회차** (같은 문제가 계속되면 반복하지 않음) | `src/notify.js` |
+| ✅ 정상 복구 | 문제 다음 회차가 정상일 때 | `src/notify.js` |
+| 📊 일일 요약 | 매일 23:55 KST, 그날 수집분 정리 (TOP 20 순위·보는중·좋아요 증가·누적판매·판매가) | `src/dailyReport.js`, `.github/workflows/light-outer-daily.yml` |
+
+웹후크가 없으면 알림 없이 수집만 정상 진행됩니다. 일일 요약은 Actions → "랭킹 경량아우터 일일 요약" → Run workflow 로 날짜를 지정해 다시 받을 수도 있습니다.
+
+### 3-3. (선택) Variables
 | 이름 | 기본값 | 설명 |
 |---|---|---|
 | `MAX_DETAIL_PER_RUN` | 60 | 1회 상세 페이지 최대 수 |
 
-### 3-3. 첫 실행 순서 (중요)
+### 3-4. 첫 실행 순서 (중요)
 1. **Actions → 랭킹 경량아우터 30분 수집 → Run workflow → mode = `probe`**
    → Artifacts 의 `probe/` 파일로 실제 페이지 구조 확인 (스크린샷, 카드 문구, API 주소)
 2. **mode = `collect`** 로 1회 수동 실행 → 실행 화면 Summary 와 드라이브 폴더의 CSV 확인
 3. 문제 없으면 이후 30분마다 자동 실행
 
-### 3-4. 로컬 실행
+### 3-5. 로컬 실행
 ```bash
 cd light-outer-monitor
 npm ci

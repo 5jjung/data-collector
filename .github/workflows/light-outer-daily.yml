@@ -1,0 +1,55 @@
+# ============================================================
+# 무신사 경량 아우터 — 하루 1번 슬랙 요약
+# 코드: light-outer-monitor/src/dailyReport.js
+# ------------------------------------------------------------
+# - 매일 23:55 KST (= 14:55 UTC) 그날 수집분(드라이브 CSV)을 정리해 슬랙 전송
+#   ※ GitHub 예약 실행은 몇 분~수십 분 늦을 수 있음 (날짜는 KST 기준으로 고정 계산)
+# - 수동 실행: Actions → 이 워크플로 → Run workflow (날짜 지정 가능)
+# 필요한 Secrets: SLACK_WEBHOOK_LIGHT_OUTER, GDRIVE_CLIENT_ID / GDRIVE_CLIENT_SECRET / GDRIVE_REFRESH_TOKEN
+# ============================================================
+name: 랭킹 경량아우터 일일 요약
+
+on:
+  schedule:
+    - cron: '55 14 * * *'
+  workflow_dispatch:
+    inputs:
+      date:
+        description: '요약할 날짜 (YYYY-MM-DD, 비우면 오늘 KST)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: light-outer-monitor
+    env:
+      TZ: Asia/Seoul
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: light-outer-monitor/package-lock.json
+
+      # 브라우저는 필요 없음 (CSV 만 읽음)
+      - run: npm ci
+
+      - name: 일일 요약 전송
+        env:
+          # 비우면 오늘(KST). 예약 실행이 늦어져 자정을 넘기면 코드에서 전날로 계산
+          REPORT_DATE: ${{ inputs.date }}
+          GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+          GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+          GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
+          GDRIVE_FOLDER_ID: ${{ vars.GDRIVE_FOLDER_ID }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_LIGHT_OUTER }}
+        run: npm run daily

@@ -81,6 +81,54 @@ function appendRunLog(slot, headers, row) {
   return appendCsv(path.join(config.DATA_DIR, logRelPath(slot)), headers, [row], false);
 }
 
+/** CSV 문자열 → 2차원 배열 (따옴표/쉼표/줄바꿈 처리) */
+function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let cell = '';
+  let q = false;
+  const s = String(text).replace(/^﻿/, '');
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (q) {
+      if (c === '"' && s[i + 1] === '"') { cell += '"'; i++; }
+      else if (c === '"') q = false;
+      else cell += c;
+    } else if (c === '"') q = true;
+    else if (c === ',') { row.push(cell); cell = ''; }
+    else if (c === '\n' || c === '\r') {
+      if (c === '\r' && s[i + 1] === '\n') i++;
+      row.push(cell); cell = '';
+      if (row.length > 1 || row[0] !== '') rows.push(row);
+      row = [];
+    } else cell += c;
+  }
+  if (cell !== '' || row.length) { row.push(cell); rows.push(row); }
+  return rows;
+}
+
+/**
+ * 누적 CSV(기본 파일 + _v2, _v3 …)를 모두 읽어 객체 배열로 반환
+ * (컬럼 구성이 달라도 헤더 이름으로 값을 찾을 수 있도록 {컬럼명: 값} 형태)
+ */
+function readAll(relPath) {
+  const out = [];
+  for (let v = 1; v < 50; v++) {
+    const rel = v === 1 ? relPath : relPath.replace(/\.csv$/, `_v${v}.csv`);
+    const file = path.join(config.DATA_DIR, rel);
+    if (!fs.existsSync(file)) { if (v > 1) break; else continue; }
+    const [header, ...rows] = parseCsv(fs.readFileSync(file, 'utf8'));
+    rows.forEach((r) => out.push(Object.fromEntries(header.map((h, i) => [h, r[i] ?? '']))));
+  }
+  return out;
+}
+
+/** 직전 회차 수집로그 한 줄 (없으면 null) — 실패 알림 중복 방지용 */
+function lastLogRow(slot) {
+  const rows = readAll(logRelPath(slot));
+  return rows.length ? rows[rows.length - 1] : null;
+}
+
 /** 회차별 상세 실패 로그(JSON) — Artifacts 용 */
 function saveRunJson(stamp, summary) {
   const file = path.join(config.OUTPUT_DIR, 'logs', `수집로그_${stamp}.json`);
@@ -89,4 +137,6 @@ function saveRunJson(stamp, summary) {
   return file;
 }
 
-module.exports = { writeCsv, appendCsv, appendDaily, appendRunLog, saveRunJson, dailyRelPath, logRelPath };
+module.exports = {
+  writeCsv, appendCsv, appendDaily, appendRunLog, saveRunJson, dailyRelPath, logRelPath, parseCsv, readAll, lastLogRow,
+};

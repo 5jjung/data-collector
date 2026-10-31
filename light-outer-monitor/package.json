@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node src/main.js",
     "probe": "node src/probe.js",
+    "daily": "node src/dailyReport.js",
     "test": "node --test test/*.test.js"
   },
   "engines": {

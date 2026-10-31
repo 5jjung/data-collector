@@ -116,7 +116,15 @@ module.exports = {
   GOOGLE_SERVICE_ACCOUNT_JSON: process.env.GOOGLE_SERVICE_ACCOUNT_JSON || '', // 공유 드라이브일 때만 사용 가능
 
   // ─────────────────────────────────────────
-  // 6. 브라우저
+  // 6. 슬랙 알림 (GitHub Secret SLACK_WEBHOOK_LIGHT_OUTER → 워크플로에서 SLACK_WEBHOOK_URL 로 전달)
+  // ─────────────────────────────────────────
+  //   - 수집 문제가 새로 생기면 즉시 알림 / 정상 복구되면 알림 (src/notify.js)
+  //   - 매일 아침 전날 요약 (src/dailyReport.js, 워크플로 light-outer-daily.yml)
+  SLACK_WEBHOOK_URL: process.env.SLACK_WEBHOOK_URL || '',
+  DAILY_REPORT_TOP_N: 20, // 일일 요약에 보여줄 상품 수
+
+  // ─────────────────────────────────────────
+  // 7. 브라우저
   // ─────────────────────────────────────────
   USER_AGENT:
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36',
