@@ -1,28 +1,34 @@
 # ============================================================
-# 품절(옵션) 감시 — 평일 자동 실행
-# - 예약 실행은 항상 MONITOR_MODE=stock (품절만). 좋아요/시청자는 musinsa-viewer-24h.yml 담당.
-# - 한국시간 평일 09:00~18:30, 30분마다 실행 (UTC 00:00~09:30)
-#   ※ 18:00, 18:30 실행은 상태만 저장하고, 생긴 변동은 '품절_대기알림'에 쌓였다가
-#     다음 평일 09:00 이후 첫 실행에 발송됩니다. (슬랙 허용 시간은 코드의 STOCK_SLACK_HOURS)
-# - 수동 실행(Run workflow)은 mode 선택 가능. 주말에 눌러도 품절 슬랙은 코드에서 차단됩니다.
+# 좋아요·실시간 보는 사람 수 + 품절(옵션) 통합 모니터링 — 이 파일 하나로 자동 실행
+# - 30분마다 24시간 실행 (매시 7분/37분, 정시는 GitHub 혼잡으로 밀려서 피함)
+# - 한국시간 평일 09:07~18:37 : MONITOR_MODE=both  (보는 사람 수 → 품절 순서로 둘 다)
+# - 그 외 시간(평일 밤·새벽, 주말 종일) : MONITOR_MODE=viewer (보는 사람 수만)
+# - 품절 슬랙 허용 시간은 코드의 STOCK_SLACK_HOURS에서 한 번 더 거릅니다.
+# - 수동 실행(Run workflow)은 mode 선택 가능 (기본 both).
+# - 예전 musinsa-viewer-24h.yml 역할을 이 파일로 합쳤습니다.
 # ============================================================
 name: 실시간 관심고객수 + 품절 통합 모니터링
 
 on:
   schedule:
-  # 한국시간 평일 09:07~18:37, 30분 간격 (정시 :00/:30은 GitHub 혼잡으로 밀려서 7분/37분에 실행)
+  # (UTC 기준 cron, 한국시간 = UTC+9)
+  # 1) 한국시간 평일 09:07~18:37 → both (보는 사람 수 + 품절)
   - cron: '7,37 0-9 * * 1-5'
+  # 2) 한국시간 매일 19:07~다음날 08:37 → viewer (보는 사람 수만)
+  - cron: '7,37 10-23 * * *'
+  # 3) 한국시간 토·일 09:07~18:37 → viewer (보는 사람 수만)
+  - cron: '7,37 0-9 * * 0,6'
   workflow_dispatch:
     inputs:
       mode:
         description: '수동 실행 대상'
         required: true
-        default: stock
+        default: both
         type: choice
         options:
+          - both
           - stock
           - viewer
-          - both
 
 # 같은 시트를 쓰는 워크플로는 모두 같은 그룹 → 동시에 두 개가 시트를 덮어쓰지 않게 줄 세움
 concurrency:
@@ -56,5 +62,5 @@ jobs:
           VIEWER_SPREADSHEET_ID: ${{ vars.OPERATING_SPREADSHEET_ID }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_VIEWER }}
           SLACK_WEBHOOK_STOCK: ${{ secrets.SLACK_WEBHOOK_STOCK }}
-          MONITOR_MODE: ${{ github.event.inputs.mode || 'stock' }}
+          MONITOR_MODE: ${{ github.event.inputs.mode || (github.event.schedule == '7,37 0-9 * * 1-5' && 'both') || 'viewer' }}
         run: node collect_viewers.js
